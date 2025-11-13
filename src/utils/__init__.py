@@ -99,7 +99,7 @@ def create_checkpoint_manager(checkpoint_dir: str = './experiments/checkpoints',
 
 # 模块初始化检查
 def _check_dependencies():
-    """检查必要的依赖"""
+    """检查必要的依赖（仅在主进程打印成功消息）"""
     import importlib
     
     dependencies = {
@@ -116,12 +116,19 @@ def _check_dependencies():
             missing.append(f"{module} ({description})")
     
     if missing:
+        # 缺失依赖总是打印（无论主进程还是子进程）
         print("⚠️ 缺少以下依赖:")
         for dep in missing:
             print(f"  - {dep}")
         print("\n请运行: pip install torch pyyaml numpy")
     else:
-        print("✅ 工具模块初始化成功")
+        # 只在主进程打印成功消息（使用multiprocessing可靠检测）
+        import multiprocessing
+        current_process = multiprocessing.current_process()
+
+        # 主进程命名为 MainProcess，子进程通常为 SpawnProcess-1 等
+        if current_process.name == 'MainProcess':
+            print("✅ 工具模块初始化成功")
 
 
 # 执行依赖检查

@@ -136,6 +136,25 @@ class DPSR:
             str(embedding_dim), self.neighborhood_size, self.regularization
         )
 
+    def _default_target_dim(self) -> int:
+        if isinstance(self.embedding_dim, int):
+            return self.embedding_dim
+        return self.embedding_dim_range[1]
+
+    @staticmethod
+    def _prepare_day_mask(day_mask: Optional[Union[np.ndarray, List[bool]]],
+                          n_samples: int,
+                          module: str = "DPSR") -> Optional[np.ndarray]:
+        if day_mask is None:
+            return None
+        mask_array = np.asarray(day_mask, dtype=bool).reshape(-1)
+        if mask_array.shape[0] != n_samples:
+            raise ValueError(
+                f"{module} day_mask 长度({mask_array.shape[0]}) "
+                f"与样本数({n_samples}) 不一致"
+            )
+        return mask_array
+
     def _compute_weighted_distances(self,
                                     data: Union[np.ndarray, "torch.Tensor"],
                                     w_squared: Union[np.ndarray, "torch.Tensor"]):
@@ -672,7 +691,8 @@ class DPSR:
 
     def fit_transform(self,
                      data: Union[np.ndarray, pd.DataFrame],
-                     labels: Optional[np.ndarray] = None) -> Tuple[np.ndarray, Dict[int, np.ndarray]]:
+                     labels: Optional[np.ndarray] = None,
+                     day_mask: Optional[Union[np.ndarray, List[bool]]] = None) -> Tuple[np.ndarray, Dict[int, np.ndarray]]:
         """
         主处理流程：学习权重并进行动态重构
 
@@ -688,22 +708,40 @@ class DPSR:
         Returns:
             Tuple[重构特征矩阵, 权重字典]
         """
-        # 转换为numpy数组
+        # ??? numpy ??
         if isinstance(data, pd.DataFrame):
             data_array = data.values
         else:
             data_array = np.asarray(data)
 
-        n_samples, n_features = data_array.shape
-        logger.info(f"开始DPSR处理: {n_samples}样本, {n_features}特征")
+        original_n_samples, n_features = data_array.shape
+        logger.info(f"???DPSR????: {original_n_samples}????, {n_features}????")
 
-        # 如果没有标签，使用下一时刻的第一个特征作为目标
+        # ??????????????????????????????????
         if labels is None:
-            # 自监督：预测下一时刻
+            #  ??????????
             labels = np.roll(data_array[:, 0], -1)
-            labels[-1] = labels[-2]  # 处理最后一个样本
+            labels[-1] = labels[-2]  # ??????????????
+        labels = np.asarray(labels)
+
+        mask_array = self._prepare_day_mask(day_mask, original_n_samples)
+        if mask_array is not None:
+            valid_indices = np.where(mask_array)[0]
+            if not valid_indices.size:
+                target_dim = self._default_target_dim()
+                logger.warning("DPSR day mask ????????????????????")
+                zeros = np.zeros((original_n_samples, target_dim), dtype=np.float32)
+                return zeros, {}
+            data_array = data_array[valid_indices]
+            labels = labels[valid_indices]
+        else:
+            valid_indices = np.arange(original_n_samples)
+
+        n_samples = data_array.shape[0]
+        index_map = valid_indices
 
         base_signal = data_array[:, 0]
+
         self.actual_time_delay = self._determine_time_delay(base_signal)
         self.actual_embedding_dim = self._determine_embedding_dim(base_signal)
 
@@ -753,48 +791,30 @@ class DPSR:
                     weights = np.ones(n_features) / n_features
 
                 # 存储权重
-                time_weights[global_idx] = weights
+                orig_idx = int(index_map[global_idx])
+                time_weights[orig_idx] = weights
 
                 current_data = data_array[global_idx:global_idx + 1]
                 reconstructed = self.dynamic_reconstruction(current_data, weights)
 
-                if reconstructed_features is None:
-                    target_dim = reconstructed.shape[1]
-                    reconstructed_features = np.zeros((n_samples, target_dim))
-
-                if reconstructed.shape[0] > 0:
-                    reconstructed_features[global_idx] = reconstructed[0]
-                
-                # 单行显示进度（每处理一个样本更新一次）
-                progress_pct = (global_idx + 1) / n_samples * 100
-                elapsed = time.time() - process_start_time
-                eta = elapsed / (global_idx + 1) * (n_samples - global_idx - 1) if global_idx > 0 else 0
-                sys.stdout.write(
-                    f"\rDPSR处理进度: [{global_idx + 1}/{n_samples}] {progress_pct:.1f}% | "
-                    f"loss: {last_loss:.4f} | iter: {last_iter} | "
-                    f"用时: {elapsed:.1f}s | 预计剩余: {eta:.1f}s"
-                )
-                sys.stdout.flush()
-        
-        # 换行
-        print()
-
-        # 计算全局平均权重
-        self.global_weights = np.mean(list(time_weights.values()), axis=0)
-        self.weights = time_weights
-        self.is_fitted = True
-        if target_dim is not None:
-            self.actual_embedding_dim = target_dim
-
         if reconstructed_features is None:
             reconstructed_features = np.zeros((n_samples, self.actual_embedding_dim or self.embedding_dim_range[1]))
 
-        logger.info(f"DPSR完成: 输出形状={reconstructed_features.shape}")
+        full_features = np.zeros(
+            (original_n_samples, reconstructed_features.shape[1]),
+            dtype=reconstructed_features.dtype,
+        )
+        full_features[index_map] = reconstructed_features[:len(index_map)]
+        logger.info(f"DPSR??: ??={full_features.shape}")
+        logger.info(f"DPSR??: ??={full_features.shape}")
 
-        return reconstructed_features, time_weights
+        return full_features, time_weights
+
+
 
     def transform(self,
-                 data: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
+                 data: Union[np.ndarray, pd.DataFrame],
+                 day_mask: Optional[Union[np.ndarray, List[bool]]] = None) -> np.ndarray:
         """
         使用已学习的权重进行转换
 
@@ -813,22 +833,36 @@ class DPSR:
         else:
             data_array = np.asarray(data)
 
+        original_n_samples = data_array.shape[0]
+        mask_array = self._prepare_day_mask(day_mask, original_n_samples)
+        if mask_array is not None:
+            valid_indices = np.where(mask_array)[0]
+            if not valid_indices.size:
+                target_dim = self.actual_embedding_dim or self._default_target_dim()
+                return np.zeros((original_n_samples, target_dim), dtype=np.float32)
+            data_array = data_array[valid_indices]
+        else:
+            valid_indices = np.arange(original_n_samples)
+
         n_samples = data_array.shape[0]
 
-        # 使用全局权重进行重构
+        # ???????????????
         reconstructed_features = self.dynamic_reconstruction(data_array, self.global_weights)
 
-        # 确保输出维度正确
+        # ????????????
         if reconstructed_features.shape[0] < n_samples:
-            # 填充不足的样本
             padding = np.zeros((n_samples - reconstructed_features.shape[0],
                                reconstructed_features.shape[1]))
             reconstructed_features = np.vstack([reconstructed_features, padding])
         elif reconstructed_features.shape[0] > n_samples:
-            # 截断多余的样本
             reconstructed_features = reconstructed_features[:n_samples]
 
-        return reconstructed_features
+        full_features = np.zeros((original_n_samples, reconstructed_features.shape[1]),
+                                 dtype=reconstructed_features.dtype)
+        full_features[valid_indices[:len(reconstructed_features)]] = reconstructed_features
+
+        return full_features
+
 
     def save_weights(self, filepath: Union[str, Path]) -> None:
         """

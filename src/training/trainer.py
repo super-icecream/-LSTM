@@ -13,13 +13,56 @@ from torch.utils.data import DataLoader
 from typing import Dict, Optional, Tuple, List
 import logging
 import sys
+import platform  # 新增：导入平台信息
+import shutil
+import unicodedata
 import os
 from pathlib import Path
 import json
 import numpy as np
 from datetime import datetime
 
+# ===============================================
+# Windows单行刷新支持：初始化colorama
+# ===============================================
+try:
+    import colorama
+    # 仅在Windows系统上初始化
+    if platform.system() == 'Windows':
+        colorama.init(autoreset=False, strip=False, wrap=True)
+        # autoreset=False: 不自动重置颜色（当前未使用颜色）
+        # strip=False: 保留ANSI控制序列
+        # wrap=True: 包装stdout/stderr，确保\r正确刷新
+except ImportError:
+    # 未安装colorama时忽略，非Windows终端原生支持\r
+    pass
+# ===============================================
+
 logger = logging.getLogger(__name__)
+
+
+def _truncate_to_width(text: str, max_cols: int) -> Tuple[str, int]:
+    """根据终端列宽裁剪字符串（支持全角字符宽度）"""
+    out_chars: List[str] = []
+    width = 0
+    for ch in text:
+        ch_w = 2 if unicodedata.east_asian_width(ch) in ('F', 'W') else 1
+        if width + ch_w > max_cols:
+            break
+        out_chars.append(ch)
+        width += ch_w
+    return ''.join(out_chars), width
+
+
+def _write_progress_single_line(line: str) -> None:
+    """在同一行刷写进度信息并动态适配终端宽度"""
+    cols = shutil.get_terminal_size(fallback=(120, 25)).columns
+    max_cols = max(10, cols - 1)  # 预留一列避免触发换行
+    clipped, width = _truncate_to_width(line, max_cols)
+    # \r\033[2K 回到行首并清除整行（colorama 包装后 Windows 亦可用）
+    sys.stdout.write('\r\033[2K')
+    sys.stdout.write(clipped + (' ' * (max_cols - width)))
+    sys.stdout.flush()
 
 
 class GPUOptimizedTrainer:
@@ -282,11 +325,11 @@ class GPUOptimizedTrainer:
                 f"{weather}: {metrics['loss']:.4f}"
                 for weather, metrics in val_results.items()
             ) if val_results else "N/A"
-            sys.stdout.write(
-                f"\r训练进度: {epoch + 1}/{epochs} ({progress_percent:.1f}%) | "
+            progress_line = (
+                f"训练进度: {epoch + 1}/{epochs} ({progress_percent:.1f}%) | "
                 f"训练损失: [{train_loss_str}] | 验证损失: [{val_loss_str}]"
             )
-            sys.stdout.flush()
+            _write_progress_single_line(progress_line)
 
         print()
         logger.info("训练完成！")
@@ -352,7 +395,7 @@ class GPUOptimizedTrainer:
                 filename = checkpoint_dir / f"checkpoint_{model_type}_epoch_{epoch}.pth"
 
             torch.save(checkpoint, filename)
-            logger.info(f"保存检查点: {filename}")
+            logger.debug(f"保存检查点: {filename}")
         else:
             # 保存所有模型
             for weather_type in self.models.keys():
@@ -369,7 +412,7 @@ class GPUOptimizedTrainer:
                 filename = checkpoint_dir / f"checkpoint_{weather_type}_epoch_{epoch}.pth"
                 torch.save(checkpoint, filename)
 
-            logger.info(f"保存所有模型检查点，epoch: {epoch}")
+            logger.debug(f"保存所有模型检查点，epoch: {epoch}")
 
     def load_checkpoint(self, checkpoint_path: str, model_type: str = None):
         """加载检查点继续训练"""
@@ -454,7 +497,7 @@ class GPUOptimizedTrainer:
                 filename = checkpoint_dir / f"checkpoint_{model_type}_epoch_{epoch}.pth"
 
             torch.save(checkpoint, filename)
-            logger.info(f"保存检查点: {filename}")
+            logger.debug(f"保存检查点: {filename}")
         else:
             # 保存所有模型
             for weather_type in self.models.keys():
@@ -471,7 +514,7 @@ class GPUOptimizedTrainer:
                 filename = checkpoint_dir / f"checkpoint_{weather_type}_epoch_{epoch}.pth"
                 torch.save(checkpoint, filename)
 
-            logger.info(f"保存所有模型检查点，epoch: {epoch}")
+            logger.debug(f"保存所有模型检查点，epoch: {epoch}")
 
     def load_checkpoint(self, checkpoint_path: str, model_type: str = None):
         """加载检查点继续训练"""

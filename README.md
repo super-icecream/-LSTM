@@ -4,7 +4,7 @@
 
 DLFE-LSTM-WSI是一个基于动态局部特征嵌入和长短期记忆网络的光伏功率预测系统。该系统通过替代昂贵的全天空成像设备，仅使用低成本的气象传感器（气压、湿度等）实现高精度的光伏功率预测。
 
-激活conda环境：conda activate "C:\Users\Administrator\桌面\专利\DLFE-LSTM-WSI\.conda
+激活conda环境：conda activate "C:\Users\Administrator\桌面\专利\DLFE-LSTM-WSI\.conda"
 
 ## 核心技术
 
@@ -92,6 +92,11 @@ DLFE-LSTM-WSI/
 - 创新性地使用NCA优化进行动态相空间重构
 - 提出基于ADMM的动态局部特征嵌入方法
 
+### 5. 白天/夜间处理策略（不改公式）
+- CI/WSI 天气判别仅在“白天”执行：白天判定默认 GE≥20 W/m²（或太阳高度≥5°）。
+- 夜间样本不参与天气分类与训练、验证、测试的序列构造（采用“序列末端为白天”的过滤）。
+- 诊断与阈值搜索同样只在白天末端序列上进行，避免夜间噪声挤压 overcast。
+
 ## 运行环境
 
 - Python >= 3.8
@@ -137,7 +142,12 @@ python main.py train --run-name demo
 python main.py test --run-name demo
 
 # Walk-Forward验证模式（4-Fold渐进验证）
-python main.py train --mode walk-forward --run-name wf_demo
+python main.py walk-forward --run-name wf_demo
+
+# 诊断/校准（仅终端输出，不落盘；默认只看白天样本）
+python -m scripts.diagnose_weather --use-cache --sequence-length 24 --ge-min 20
+# 如需阈值建议（粗搜索）：
+python -m scripts.diagnose_weather --use-cache --calibrate --sequence-length 24 --ge-min 20
 
 # 或使用脚本包装
 python scripts/prepare_data.py --run-name demo

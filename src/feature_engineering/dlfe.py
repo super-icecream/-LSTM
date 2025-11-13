@@ -890,66 +890,75 @@ class DLFE:
 
     def fit(self,
             X_train: Union[np.ndarray, pd.DataFrame],
-            dpsr_weights: Optional[Union[np.ndarray, Dict]] = None) -> 'DLFE':
+            dpsr_weights: Optional[Union[np.ndarray, Dict]] = None,
+            day_mask: Optional[Union[np.ndarray, List[bool]]] = None) -> 'DLFE':
         """
-        从训练集学习映射矩阵A
-
-        1. 构建相似度矩阵
-        2. 计算拉普拉斯矩阵
-        3. ADMM优化求解A
-        4. 存储映射矩阵供transform使用
+        ??????????? A?
 
         Args:
-            X_train: 训练数据 (n_samples x n_features)
-            dpsr_weights: DPSR提供的动态权重（可选）
+            X_train: ???? (n_samples x n_features)
+            dpsr_weights: ?? DPSR ?????
+            day_mask: ?????True ??????
 
         Returns:
-            self: 返回自身以支持链式调用
+            self
         """
-        # 转换为numpy数组
         if isinstance(X_train, pd.DataFrame):
             X = X_train.values
         else:
             X = np.asarray(X_train)
 
         n_samples, n_features = X.shape
-        logger.info(f"开始DLFE训练: {n_samples}样本, {n_features}特征 -> {self.target_dim}维")
+        mask_array = None
+        if day_mask is not None:
+            mask_array = np.asarray(day_mask, dtype=bool).reshape(-1)
+            if mask_array.shape[0] != n_samples:
+                raise ValueError(
+                    f"DLFE day_mask ??({mask_array.shape[0]}) ????({n_samples}) ???"
+                )
+            valid_idx = np.where(mask_array)[0]
+            if not valid_idx.size:
+                raise ValueError("DLFE fit: day_mask ??????????")
+            X = X[valid_idx]
+            n_samples = X.shape[0]
+        else:
+            valid_idx = None
 
-        # 处理DPSR权重
+        logger.info(f"??DLFE??: {n_samples}??, {n_features}?? -> {self.target_dim}?")
+
         if dpsr_weights is not None:
             if isinstance(dpsr_weights, dict):
-                # 如果是字典，计算平均权重
-                weights_list = list(dpsr_weights.values())
-                avg_weights = np.mean(weights_list, axis=0)
+                if valid_idx is not None:
+                    weights_list = [dpsr_weights[idx] for idx in valid_idx if idx in dpsr_weights]
+                else:
+                    weights_list = list(dpsr_weights.values())
+                avg_weights = np.mean(weights_list, axis=0) if weights_list else None
             else:
                 avg_weights = dpsr_weights
         else:
             avg_weights = None
 
-        # Step 1: 构建相似度矩阵
-        logger.info("构建相似度矩阵...")
+        logger.info("???????...")
         Q = self.build_similarity_matrix(X, weights=avg_weights, k_neighbors=min(50, n_samples - 1))
 
-        # Step 2: 构建拉普拉斯矩阵
-        logger.info("构建拉普拉斯矩阵...")
+        logger.info("????????...")
         L = self.construct_laplacian(Q)
 
-        # ========== 诊断矩阵稀疏性 ==========
-        logger.info("\n开始诊断矩阵稀疏性...")
-        Q_diagnosis = diagnose_matrix_sparsity(Q, "相似度矩阵 Q")
-        L_diagnosis = diagnose_matrix_sparsity(L, "拉普拉斯矩阵 L")
+        logger.info("\n?????????...")
+        Q_diagnosis = diagnose_matrix_sparsity(Q, "????? Q")
+        L_diagnosis = diagnose_matrix_sparsity(L, "?????? L")
+        L_diagnosis = diagnose_matrix_sparsity(L, "?????? L")
         self._sparsity_diagnosis = {
             "Q": Q_diagnosis,
             "L": L_diagnosis,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         if L_diagnosis["should_use_sparse"]:
-            logger.warning("⚠️  检测到拉普拉斯矩阵L高度稀疏！")
-            logger.warning("    当前将使用密集矩阵（需要 %.2f GB GPU显存）", L_diagnosis["dense_memory_gb"])
-            logger.warning("    建议启用稀疏矩阵优化（仅需 %.2f MB）", L_diagnosis["sparse_memory_mb"])
-            logger.warning("    可节省 %.1fx 内存！", L_diagnosis["savings_ratio"])
-
-        # Clear GPU cache after matrix construction to avoid OOM in ADMM.
+            logger.warning("??  ????????? L ?????")
+            logger.warning("    ???????????? %.2f GB GPU ???", L_diagnosis["dense_memory_gb"])
+            logger.warning("    ????????????? %.2f MB?", L_diagnosis["sparse_memory_mb"])
+            logger.warning("    ??? %.1fx ???", L_diagnosis["savings_ratio"])
+            logger.warning("    ??? %.1fx ???", L_diagnosis["savings_ratio"])
         if self.use_gpu and self._torch is not None:
             import gc
 
@@ -957,74 +966,67 @@ class DLFE:
             if self._torch.cuda.is_available():
                 self._torch.cuda.empty_cache()
                 allocated = self._torch.cuda.memory_allocated() / 1024 ** 3
-                logger.info("✓ 矩阵构建后清理GPU - 已分配: %.2f GB", allocated)
+                logger.info("? ???????GPU - ???: %.2f GB", allocated)
 
-        # Step 3: ADMM优化
-        logger.info("开始ADMM优化...")
+        logger.info("??ADMM??...")
         if self.use_gpu and self._torch is not None:
-            logger.info("DLFE使用GPU路径执行ADMM优化")
+            logger.info("DLFE ??GPU????ADMM??")
             self.mapping_matrix = self._admm_optimization_gpu(X, L)
         else:
-            logger.info("DLFE使用CPU路径执行ADMM优化")
+            logger.info("DLFE ??CPU????ADMM??")
             self.mapping_matrix = self.admm_optimization(X, L)
 
         self.is_fitted = True
 
-        logger.info(f"DLFE训练完成，映射矩阵形状: {self.mapping_matrix.shape}")
+        logger.info(f"DLFE???????????: {self.mapping_matrix.shape}")
 
         return self
-
-    def transform(self, X: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
+    def transform(self,
+                 X: Union[np.ndarray, pd.DataFrame],
+                 day_mask: Optional[Union[np.ndarray, List[bool]]] = None) -> np.ndarray:
         """
-        应用学习到的映射矩阵
-
-        F = X * A
-        将输入降维到30维
-
-        Args:
-            X: 输入数据 (n_samples x n_features)
-
-        Returns:
-            降维后的特征 (n_samples x target_dim)
+        ?????????????????
         """
         if not self.is_fitted:
-            raise RuntimeError("请先调用fit方法学习映射矩阵")
+            raise RuntimeError("????fit????????")
 
-        # 转换为numpy数组
         if isinstance(X, pd.DataFrame):
             X_array = X.values
         else:
             X_array = np.asarray(X)
 
-        # 检查特征维度
+        original_n_samples = X_array.shape[0]
+        mask_array = None
+        if day_mask is not None:
+            mask_array = np.asarray(day_mask, dtype=bool).reshape(-1)
+            if mask_array.shape[0] != original_n_samples:
+                raise ValueError(
+                    f"DLFE day_mask ??({mask_array.shape[0]}) ????({original_n_samples}) ???"
+                )
+            valid_idx = np.where(mask_array)[0]
+            if not valid_idx.size:
+                return np.zeros((original_n_samples, self.target_dim), dtype=np.float32)
+            X_array = X_array[valid_idx]
+        else:
+            valid_idx = np.arange(original_n_samples)
+
         if X_array.shape[1] != self.mapping_matrix.shape[0]:
-            raise ValueError(f"特征维度不匹配: 输入{X_array.shape[1]}维, "
-                           f"期望{self.mapping_matrix.shape[0]}维")
+            raise ValueError(f"???????: ??{X_array.shape[1]}?, ??{self.mapping_matrix.shape[0]}?")
 
-        # 应用映射
         F = X_array @ self.mapping_matrix
+        full_F = np.zeros((original_n_samples, F.shape[1]), dtype=F.dtype)
+        full_F[valid_idx[:F.shape[0]]] = F[:len(valid_idx)]
 
-        # 归一化（可选）
-        # F = F / (np.linalg.norm(F, axis=1, keepdims=True) + 1e-10)
-
-        return F
-
+        return full_F
     def fit_transform(self,
                      X_train: Union[np.ndarray, pd.DataFrame],
-                     dpsr_weights: Optional[Union[np.ndarray, Dict]] = None) -> np.ndarray:
+                     dpsr_weights: Optional[Union[np.ndarray, Dict]] = None,
+                     day_mask: Optional[Union[np.ndarray, List[bool]]] = None) -> np.ndarray:
         """
-        组合fit和transform
-
-        Args:
-            X_train: 训练数据
-            dpsr_weights: DPSR权重
-
-        Returns:
-            降维后的特征 (n_samples x target_dim)
+        ?? fit + transform????????
         """
-        self.fit(X_train, dpsr_weights)
-        return self.transform(X_train)
-
+        self.fit(X_train, dpsr_weights, day_mask=day_mask)
+        return self.transform(X_train, day_mask=day_mask)
     def save_mapping(self, filepath: Union[str, Path]) -> None:
         """
         保存映射矩阵

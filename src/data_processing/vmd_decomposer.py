@@ -8,7 +8,7 @@ VMD变分模态分解模块
 
 import numpy as np
 import pandas as pd
-from typing import Tuple, List, Optional, Union, Dict
+from typing import Tuple, List, Optional, Union, Dict, Iterator
 from pathlib import Path
 import logging
 import json
@@ -348,45 +348,116 @@ class VMDDecomposer:
         return combined_features
 
     def process_dataset(self, data: pd.DataFrame,
-                       power_column: str = 'power') -> pd.DataFrame:
+                       power_column: str = 'power',
+                       day_mask: Optional[Union[np.ndarray, List[bool]]] = None) -> pd.DataFrame:
         """
-        处理整个数据集
+        ?????????????
 
-        对数据集中的功率序列进行VMD分解，并与其他特征重组。
+        ????????????????????VMD???????????????????
 
         Args:
-            data: 输入数据集，必须包含功率列和其他特征列
-            power_column: 功率列名称
+            data: ???????????????????????????????????
+            power_column: ??????????
+            day_mask: ????????????True ????????VMD
 
         Returns:
-            pd.DataFrame: 处理后的特征数据框
+            pd.DataFrame: ????????????????
         """
         if power_column not in data.columns:
-            # 尝试其他可能的列名
+            # ?????????????????
             possible_names = ['P', 'Power', 'power', 'pv_power']
             for name in possible_names:
                 if name in data.columns:
                     power_column = name
                     break
             else:
-                raise ValueError(f"找不到功率列，尝试过: {possible_names}")
+                raise ValueError(f"?????????????????: {possible_names}")
 
-        logger.info(f"处理数据集，功率列: {power_column}")
+        logger.info(f"?????????????????: {power_column}")
 
-        # 提取功率序列
+        # ???????????
         power_signal = data[power_column].values
+        day_mask_array: Optional[np.ndarray] = None
+        if day_mask is not None:
+            day_mask_array = np.asarray(day_mask, dtype=bool).reshape(-1)
+            if day_mask_array.shape[0] != power_signal.shape[0]:
+                raise ValueError(
+                    f"day_mask ????({day_mask_array.shape[0]}) ?? "
+                    f"??????????({power_signal.shape[0]}) ?????"
+                )
 
-        # 执行VMD分解
+        if day_mask_array is not None:
+            return self._process_daytime_segments(
+                power_signal,
+                data,
+                day_mask_array,
+                power_column=power_column,
+            )
+
+        # ???VMD???
         imfs, omega = self.decompose(power_signal)
 
-        # 提取其他特征
+        # ???????????
         other_columns = [col for col in data.columns if col != power_column]
         other_features = data[other_columns]
 
-        # 重组特征
+        # ????????
         processed_features = self.reconstruct_features(imfs, other_features)
 
         return processed_features
+
+    def _process_daytime_segments(
+        self,
+        signal: np.ndarray,
+        data: pd.DataFrame,
+        day_mask: np.ndarray,
+        power_column: str,
+    ) -> pd.DataFrame:
+        """
+        ??? day mask ????????????? VMD???????????0
+        """
+        imfs_full = np.zeros((self.n_modes, len(signal)), dtype=np.float32)
+        processed_segments = 0
+        for start, end in self._iter_day_segments(day_mask):
+            segment = signal[start:end]
+            if len(segment) < max(self.n_modes * 2, 8):
+                logger.debug(
+                    "VMD segment[%d:%d] ??? %d < %d??????",
+                    start,
+                    end,
+                    len(segment),
+                    max(self.n_modes * 2, 8),
+                )
+                continue
+
+            imfs_seg, _ = self.decompose(segment)
+            seg_len = min(imfs_seg.shape[1], end - start)
+            imfs_full[:, start:start + seg_len] = imfs_seg[:, :seg_len]
+            processed_segments += 1
+
+        if not processed_segments:
+            logger.warning(
+                "day mask ???????????????????VMD????0"
+            )
+
+        other_features = data.drop(columns=[power_column])
+        return self.reconstruct_features(imfs_full, other_features)
+
+    @staticmethod
+    def _iter_day_segments(day_mask: np.ndarray) -> Iterator[Tuple[int, int]]:
+        """
+        ???? day mask ????? [start, end) ???
+        """
+        start_idx: Optional[int] = None
+        for idx, is_day in enumerate(day_mask):
+            if is_day and start_idx is None:
+                start_idx = idx
+            elif not is_day and start_idx is not None:
+                yield start_idx, idx
+                start_idx = None
+        if start_idx is not None:
+            yield start_idx, len(day_mask)
+
 
     def analyze_imfs(self, imfs: np.ndarray) -> Dict:
         """

@@ -34,6 +34,7 @@ root_logger.setLevel(logging.INFO)
 import argparse
 import gc
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -199,17 +200,30 @@ def load_cached_feature_split(directory: Path, split: str) -> Optional[Dict[str,
     if not required_keys.issubset(data.files):
         return None
 
+    if "day_mask" not in data.files:
+        return None
+    day_mask = data["day_mask"]
+
     return {
         "features": data["features"],
         "targets": data["targets"],
         "weather": data["weather"],
+        "day_mask": day_mask.astype(bool),
     }
 
 
-def save_feature_split(directory: Path, split: str, features: np.ndarray, targets: np.ndarray, weather: np.ndarray) -> None:
+def save_feature_split(directory: Path, split: str, features: np.ndarray, targets: np.ndarray, weather: np.ndarray,
+                       day_mask: Optional[np.ndarray] = None) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     file_path = directory / f"{split}_features.npz"
-    np.savez_compressed(file_path, features=features, targets=targets, weather=weather)
+    save_kwargs = {
+        "features": features,
+        "targets": targets,
+        "weather": weather,
+    }
+    if day_mask is not None:
+        save_kwargs["day_mask"] = day_mask
+    np.savez_compressed(file_path, **save_kwargs)
 
 
 def align_length(arrays: Iterable[np.ndarray]) -> Tuple[np.ndarray, ...]:
@@ -332,6 +346,41 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
     test_proc = preprocessor.transform(test_df)
     preprocessor.save_params(paths.artifacts / "preprocessor.json")
 
+    fe_cfg = config.get("feature_engineering", {})
+    daytime_cfg = fe_cfg.get("daytime", {})
+    weather_classifier = WeatherClassifier(
+        ci_thresholds=fe_cfg.get("ci_thresholds", [0.2, 0.6]),
+        wsi_thresholds=fe_cfg.get("wsi_thresholds", [0.3, 0.7]),
+        fusion_weights=fe_cfg.get("fusion_weights", {"ci": 0.7, "wsi": 0.3}),
+        daytime_ge_min=daytime_cfg.get("ge_min_wm2", 20.0),
+        night_handling=daytime_cfg.get("night_handling", "exclude"),
+    )
+    train_weather = weather_classifier.classify(train_df)
+    val_weather = weather_classifier.classify(val_df)
+    test_weather = weather_classifier.classify(test_df)
+
+    def _extract_day_mask(bundle: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
+        mask = bundle.get("day_mask")
+        return np.asarray(mask, dtype=bool) if mask is not None else None
+
+    train_day_mask = _extract_day_mask(train_weather)
+    val_day_mask = _extract_day_mask(val_weather)
+    test_day_mask = _extract_day_mask(test_weather)
+
+    with open(paths.artifacts / "weather_classifier.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "ci_thresholds": weather_classifier.ci_thresholds,
+                "wsi_thresholds": weather_classifier.wsi_thresholds,
+                "fusion_weights": weather_classifier.fusion_weights,
+                "daytime_ge_min": weather_classifier.daytime_ge_min,
+                "night_handling": weather_classifier.night_handling,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
     vmd_cfg = config.get("preprocessing", {}).get("vmd", {})
     vmd = VMDDecomposer(
         n_modes=vmd_cfg.get("n_modes", 5),
@@ -342,32 +391,20 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
         tol=vmd_cfg.get("tolerance", 1e-6),
         max_iter=vmd_cfg.get("max_iter", 500),
     )
-    train_vmd = vmd.process_dataset(train_proc)
-    val_vmd = vmd.process_dataset(val_proc)
-    test_vmd = vmd.process_dataset(test_proc)
-    vmd.save_params(paths.artifacts / "vmd.pkl")
-
-    fe_cfg = config.get("feature_engineering", {})
-    weather_classifier = WeatherClassifier(
-        ci_thresholds=fe_cfg.get("ci_thresholds", [0.2, 0.6]),
-        wsi_thresholds=fe_cfg.get("wsi_thresholds", [0.3, 0.7]),
-        fusion_weights=fe_cfg.get("fusion_weights", {"ci": 0.7, "wsi": 0.3}),
+    apply_mask_vmd = daytime_cfg.get("apply_mask_in_vmd", False)
+    train_vmd = vmd.process_dataset(
+        train_proc,
+        day_mask=train_day_mask if apply_mask_vmd else None,
     )
-    train_weather = weather_classifier.classify(train_proc)
-    val_weather = weather_classifier.classify(val_proc)
-    test_weather = weather_classifier.classify(test_proc)
-
-    with open(paths.artifacts / "weather_classifier.json", "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "ci_thresholds": weather_classifier.ci_thresholds,
-                "wsi_thresholds": weather_classifier.wsi_thresholds,
-                "fusion_weights": weather_classifier.fusion_weights,
-            },
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
+    val_vmd = vmd.process_dataset(
+        val_proc,
+        day_mask=val_day_mask if apply_mask_vmd else None,
+    )
+    test_vmd = vmd.process_dataset(
+        test_proc,
+        day_mask=test_day_mask if apply_mask_vmd else None,
+    )
+    vmd.save_params(paths.artifacts / "vmd.pkl")
 
     dpsr_cfg = fe_cfg.get("dpsr", {})
     dpsr = DPSR(
@@ -378,15 +415,25 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
         max_iter=dpsr_cfg.get("max_iter", 100),
         learning_rate=dpsr_cfg.get("learning_rate", 0.01),
     )
-    train_dpsr, dpsr_weights = dpsr.fit_transform(train_vmd)
+    apply_mask_dpsr = daytime_cfg.get("apply_mask_in_dpsr", False)
+    train_dpsr, dpsr_weights = dpsr.fit_transform(
+        train_vmd,
+        day_mask=train_day_mask if apply_mask_dpsr else None,
+    )
     # 记录各数据集样本量供自适应处理参考
     dpsr.last_split_sizes = {
         "train": len(train_vmd),
         "val": len(val_vmd),
         "test": len(test_vmd),
     }
-    val_dpsr = dpsr.transform(val_vmd)
-    test_dpsr = dpsr.transform(test_vmd)
+    val_dpsr = dpsr.transform(
+        val_vmd,
+        day_mask=val_day_mask if apply_mask_dpsr else None,
+    )
+    test_dpsr = dpsr.transform(
+        test_vmd,
+        day_mask=test_day_mask if apply_mask_dpsr else None,
+    )
     dpsr.save_weights(paths.artifacts / "dpsr_weights.pkl")
 
     # Clear GPU cache after DPSR to avoid OOM during DLFE.
@@ -408,20 +455,35 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
         use_float32_eigh=dlfe_cfg.get("use_float32_eigh", False),
         use_sparse_matrix=dlfe_cfg.get("use_sparse_matrix", True),
     )
-    train_dlfe = dlfe.fit_transform(train_dpsr)
-    val_dlfe = dlfe.transform(val_dpsr)
-    test_dlfe = dlfe.transform(test_dpsr)
+    apply_mask_dlfe = daytime_cfg.get("apply_mask_in_dlfe", False)
+    train_dlfe = dlfe.fit_transform(
+        train_dpsr,
+        dpsr_weights,
+        day_mask=train_day_mask if apply_mask_dlfe else None,
+    )
+    val_dlfe = dlfe.transform(
+        val_dpsr,
+        day_mask=val_day_mask if apply_mask_dlfe else None,
+    )
+    test_dlfe = dlfe.transform(
+        test_dpsr,
+        day_mask=test_day_mask if apply_mask_dlfe else None,
+    )
     dlfe.save_mapping(paths.artifacts / "dlfe_mapping.pkl")
 
-    def build_feature_set(features: np.ndarray, processed: pd.DataFrame, weather: np.ndarray) -> Dict[str, np.ndarray]:
+    def build_feature_set(features: np.ndarray, processed: pd.DataFrame, weather_bundle: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         feature_array = sanitize_feature_array(features)
         target_array = sanitize_feature_array(processed["power"].values.astype(np.float32))
-        weather_array = np.asarray(weather, dtype=np.int64)
-        feature_array, target_array, weather_array = align_length([feature_array, target_array, weather_array])
+        weather_array = np.asarray(weather_bundle["labels"], dtype=np.int64)
+        day_mask_array = np.asarray(weather_bundle.get("day_mask", np.ones_like(weather_array, dtype=bool)), dtype=bool)
+        feature_array, target_array, weather_array, day_mask_array = align_length(
+            [feature_array, target_array, weather_array, day_mask_array]
+        )
         return {
             "features": feature_array,
             "targets": sanitize_feature_array(target_array).reshape(-1, 1),
             "weather": weather_array,
+            "day_mask": day_mask_array.astype(bool),
         }
 
     feature_sets = {
@@ -451,8 +513,10 @@ def prepare_feature_sets(config: Dict, paths: PipelinePaths, logger, force_rebui
             feature_sets[split]["features"],
             feature_sets[split]["targets"],
             feature_sets[split]["weather"],
+            feature_sets[split].get("day_mask"),
         )
     return feature_sets
+
 
 
 def build_sequence_sets(
@@ -460,16 +524,26 @@ def build_sequence_sets(
     sequence_length: int,
     logger,
 ) -> Dict[str, Dict[str, np.ndarray]]:
-    base_loader = PVDataLoader()  # 仅复用 create_sequence_data
+    base_loader = PVDataLoader()  # 复用 create_sequence_data
     sequence_sets: Dict[str, Dict[str, np.ndarray]] = {}
 
     for split, data in feature_sets.items():
         features = data["features"]
         targets = data["targets"].flatten()
         weather = data["weather"]
+        day_mask_points = (
+            np.asarray(data.get("day_mask"), dtype=bool)
+            if data.get("day_mask") is not None
+            else np.ones(len(features), dtype=bool)
+        )
 
         if len(features) <= sequence_length:
             raise ValueError(f"{split} 数据长度不足以构建序列 (len={len(features)}, sequence_length={sequence_length})")
+
+        if len(day_mask_points) != len(features):
+            raise ValueError(
+                f"{split} 的 day_mask 长度({len(day_mask_points)}) 与特征长度({len(features)}) 不一致"
+            )
 
         seq_features, seq_targets, seq_weather = base_loader.create_sequence_data(
             features,
@@ -478,21 +552,54 @@ def build_sequence_sets(
             weather_array=weather,
         )
 
-        sequence_sets[split] = {
-            "features": seq_features.astype(np.float32),
-            "targets": seq_targets.astype(np.float32),
-            "weather": seq_weather.astype(np.int64),
-        }
+        total_sequences = seq_features.shape[0]
+        seq_day_mask = day_mask_points[sequence_length - 1 :]
+        keep_mask = seq_day_mask.astype(bool)
+
+        filtered_features = seq_features[keep_mask]
+        filtered_targets = seq_targets[keep_mask]
+        filtered_weather = seq_weather[keep_mask]
+        filtered_day_mask = seq_day_mask[keep_mask]
+
+        if filtered_features.size == 0:
+            logger.warning("%s 剔除夜间后无有效序列，请检查白天阈值设置", split)
+
+        valid_mask = filtered_weather >= 0
+        if not np.all(valid_mask):
+            filtered_features = filtered_features[valid_mask]
+            filtered_targets = filtered_targets[valid_mask]
+            filtered_weather = filtered_weather[valid_mask]
+            filtered_day_mask = filtered_day_mask[valid_mask]
+
+        kept_sequences = int(filtered_features.shape[0])
+        day_ratio = float(kept_sequences / total_sequences) if total_sequences else 0.0
+        weather_counts = {name: int(np.sum(filtered_weather == idx)) for idx, name in WEATHER_MAP.items()}
+
         logger.info(
-            "%s 序列数据构建完成: 样本数=%d, 序列长度=%d, 特征维度=%d",
+            "%s 序列数据(白天末端)构建完成: 样本=%d/%d (保留率=%.1f%%), 序列长度=%d, 特征维度=%d",
             split,
-            seq_features.shape[0],
-            seq_features.shape[1],
-            seq_features.shape[2],
+            kept_sequences,
+            total_sequences,
+            day_ratio * 100,
+            filtered_features.shape[1] if kept_sequences else sequence_length,
+            filtered_features.shape[2] if kept_sequences else features.shape[1],
         )
+        logger.info("%s 天气样本分布(白天末端): %s", split, weather_counts)
+
+        sequence_sets[split] = {
+            "features": filtered_features.astype(np.float32),
+            "targets": filtered_targets.astype(np.float32),
+            "weather": filtered_weather.astype(np.int64),
+            "day_mask": filtered_day_mask.astype(bool),
+            "meta": {
+                "kept_sequences": kept_sequences,
+                "total_sequences": int(total_sequences),
+                "day_ratio": day_ratio,
+                "weather_counts": weather_counts,
+            },
+        }
 
     return sequence_sets
-
 
 def build_weather_dataloaders(
     sequence_set: Dict[str, np.ndarray],
@@ -500,9 +607,40 @@ def build_weather_dataloaders(
     num_workers: int,
     shuffle: bool,
 ) -> Dict[str, DataLoader]:
+    logger = logging.getLogger(__name__)
     features = sequence_set["features"]
     targets = sequence_set["targets"]
     weather = sequence_set["weather"]
+    day_mask = sequence_set.get("day_mask")
+
+    if day_mask is not None and day_mask.size and not np.all(day_mask):
+        valid_mask = day_mask.astype(bool)
+        features = features[valid_mask]
+        targets = targets[valid_mask]
+        weather = weather[valid_mask]
+
+    valid_weather_mask = weather >= 0
+    if not np.all(valid_weather_mask):
+        features = features[valid_weather_mask]
+        targets = targets[valid_weather_mask]
+        weather = weather[valid_weather_mask]
+
+    total_samples = features.shape[0]
+    weather_counts = {name: int(np.sum(weather == idx)) for idx, name in WEATHER_MAP.items()}
+    seq_meta = sequence_set.get("meta", {})
+    day_ratio = seq_meta.get("day_ratio")
+    if day_ratio is not None:
+        logger.info("序列集白天占比: %.2f%% (样本=%d)", day_ratio * 100, total_samples)
+    logger.info("天气样本数: %s", weather_counts)
+
+    min_required = max(batch_size * 10, 1000)
+    scarce = {name: count for name, count in weather_counts.items() if count < min_required}
+    if scarce:
+        logger.warning(
+            "以下天气类别样本数低于推荐阈值 %d: %s。建议运行 scripts/diagnose_weather.py 进行阈值校准。",
+            min_required,
+            scarce,
+        )
 
     dataloaders: Dict[str, DataLoader] = {}
     for weather_idx, weather_name in WEATHER_MAP.items():
@@ -669,6 +807,9 @@ def run_train(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logg
     if paths.run_dir is None:
         paths = resolve_paths(config, run_name)
     logger.info("启动训练任务，运行名称：%s", run_name)
+
+    if not getattr(args, "force_rebuild", False):
+        args.force_rebuild = choose_feature_rebuild(args, paths, logger)
 
     feature_sets = prepare_feature_sets(config, paths, logger, args.force_rebuild)
     seq_length = config.get("data", {}).get("sequence_length", 24)
@@ -849,7 +990,85 @@ def run_test(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logge
     logger.info("测试评估完成，结果保存至 %s", paths.results)
 
 
+
+
+def choose_train_mode(args) -> str:
+    """
+    交互式选择训练模式，返回 'train' 或 'walk-forward'。
+
+    优先读取环境变量 DLFE_TRAIN_MODE；若终端非交互则默认返回 'train'。
+    输入 3 允许用户取消执行。
+    """
+    env_mode = os.getenv("DLFE_TRAIN_MODE", "").strip().lower()
+    if env_mode in {"train", "walk-forward"}:
+        return env_mode
+
+    try:
+        if not sys.stdin.isatty():
+            return "train"
+    except Exception:
+        return "train"
+
+    print()
+    print("请选择训练模式：")
+    print("1) 标准训练")
+    print("2) Walk-Forward 验证")
+    print("3) 取消")
+    sel = input("请输入数字并回车 [默认1]: ").strip()
+
+    if sel == "2":
+        return "walk-forward"
+    if sel == "3":
+        print("已取消。")
+        raise SystemExit(0)
+    return "train"
+
+
+def _feature_cache_exists(paths: PipelinePaths) -> bool:
+    feats = paths.features
+    return all((feats / name).exists() for name in ("train_features.npz", "val_features.npz", "test_features.npz"))
+
+
+def choose_feature_rebuild(args, paths: PipelinePaths, logger) -> bool:
+    """
+    根据环境变量 / 交互输入决定是否重新运行特征流水线。
+    返回 True 表示从头重算（等同 --force-rebuild），False 表示沿用缓存。
+    """
+    if not _feature_cache_exists(paths):
+        logger.info("未发现特征缓存，自动从头重算（VMD/DPSR/DLFE）。")
+        return True
+
+    env = os.getenv("DLFE_FORCE_REBUILD", "").strip().lower()
+    if env in {"1", "true", "yes", "y"}:
+        logger.info("DLFE_FORCE_REBUILD=%s，按要求从头重算特征。", env)
+        return True
+    if env in {"0", "false", "no", "n"}:
+        logger.info("DLFE_FORCE_REBUILD=%s，沿用现有特征缓存。", env)
+        return False
+
+    try:
+        if not sys.stdin.isatty():
+            logger.info("检测到非交互环境，默认使用特征缓存（可用 DLFE_FORCE_REBUILD 覆盖）。")
+            return False
+    except Exception:
+        return False
+
+    print()
+    print("检测到特征缓存 (data/features/*.npz)")
+    print("1) 使用缓存（更快）")
+    print("2) 从头重算（执行 VMD/DPSR/DLFE 全流程）")
+    print("3) 取消")
+    sel = input("请选择 [默认1]: ").strip()
+    if sel == "2":
+        return True
+    if sel == "3":
+        print("已取消。")
+        raise SystemExit(0)
+    return False
+
 def run_prepare(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logger) -> None:
+    if not getattr(args, "force_rebuild", False):
+        args.force_rebuild = choose_feature_rebuild(args, paths, logger)
     prepare_feature_sets(config, paths, logger, args.force_rebuild)
     logger.info("特征缓存已准备完毕")
 
@@ -869,7 +1088,11 @@ def main() -> None:
         elif args.mode == "walk-forward":
             run_walk_forward(args, config, paths, logger)
         elif args.mode == "train":
-            run_train(args, config, paths, logger)
+            chosen_mode = choose_train_mode(args)
+            if chosen_mode == "walk-forward":
+                run_walk_forward(args, config, paths, logger)
+            else:
+                run_train(args, config, paths, logger)
         elif args.mode == "test":
             run_test(args, config, paths, logger)
         else:

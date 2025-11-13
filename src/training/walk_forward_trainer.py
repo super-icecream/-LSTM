@@ -1,8 +1,8 @@
-"""
+﻿"""
 WalkForwardTrainer
 ==================
 
-负责 orchestrate Walk-Forward 训练、评估与在线学习流程。
+璐熻矗 orchestrate Walk-Forward 璁粌銆佽瘎浼颁笌鍦ㄧ嚎瀛︿範娴佺▼銆?
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def _sanitize_array(array: np.ndarray) -> np.ndarray:
 
 
 class WalkForwardTrainer:
-    """围绕 Walk-Forward 划分执行训练 / 评估 / 在线学习。"""
+    """Walk-Forward 划分执行训练 / 评估 / 在线学习的调度器"""
 
     def __init__(
         self,
@@ -108,7 +108,7 @@ class WalkForwardTrainer:
         for fold in folds:
             fold_id = fold["id"]
             self.logger.info("=" * 80)
-            self.logger.info("开始训练 Fold %d/%d", fold_id, len(folds))
+            self.logger.info("寮€濮嬭缁?Fold %d/%d", fold_id, len(folds))
             self.logger.info("=" * 80)
 
             artifact_dir = self.base_artifact_dir / f"fold_{fold_id:02d}"
@@ -120,6 +120,19 @@ class WalkForwardTrainer:
 
             feature_sets = self._prepare_fold_features(fold, artifact_dir)
             sequence_sets = self.build_sequence_sets(feature_sets, self.seq_length, self.logger)
+            daytime_stats: Dict[str, Dict[str, Any]] = {}
+            for split_name in ("train", "val", "test"):
+                meta = sequence_sets[split_name].get("meta", {}) if sequence_sets.get(split_name) else {}
+                daytime_stats[split_name] = meta
+                day_ratio = meta.get("day_ratio")
+                if day_ratio is not None:
+                    self.logger.info(
+                        "Fold %d %s 鐧藉ぉ搴忓垪鍗犳瘮: %.2f%% (鏍锋湰=%s)",
+                        fold_id,
+                        split_name,
+                        day_ratio * 100,
+                        meta.get("kept_sequences", "N/A"),
+                    )
 
             train_loaders = self.build_weather_dataloaders(
                 sequence_sets["train"], self.batch_size, self.num_workers, shuffle=True
@@ -140,7 +153,7 @@ class WalkForwardTrainer:
 
             if prev_state and self.weight_cfg.get("enable", True):
                 self._load_previous_state(multi_model, prev_state)
-                self.logger.info("Fold %d 使用上一 fold 的模型权重初始化", fold_id)
+                self.logger.info("Fold %d 浣跨敤涓婁竴 fold 鐨勬ā鍨嬫潈閲嶅垵濮嬪寲", fold_id)
 
             training_cfg = dict(self.training_cfg)
             training_cfg["checkpoint_dir"] = str(checkpoint_dir)
@@ -176,6 +189,7 @@ class WalkForwardTrainer:
                 "fold_id": fold_id,
                 "time_ranges": fold["time_ranges"],
                 "sizes": fold["size"],
+                "daytime_stats": daytime_stats,
                 "test_metrics": test_metrics["overall"],
                 "per_weather_metrics": test_metrics["per_weather"],
                 "online_metrics": online_metrics,
@@ -201,7 +215,7 @@ class WalkForwardTrainer:
         summary = {"folds": fold_results, "aggregate": aggregate}
         with open(self.base_result_dir / "summary.json", "w", encoding="utf-8") as fp:
             json.dump(summary, fp, ensure_ascii=False, indent=2)
-        self.logger.info("Walk-Forward 全流程完成，汇总结果已保存至 %s", self.base_result_dir / "summary.json")
+        self.logger.info("Walk-Forward 鍏ㄦ祦绋嬪畬鎴愶紝姹囨€荤粨鏋滃凡淇濆瓨鑷?%s", self.base_result_dir / "summary.json")
         return summary
 
     # ------------------------------------------------------------------ helpers
@@ -221,6 +235,40 @@ class WalkForwardTrainer:
         test_proc = preprocessor.transform(test_df)
         preprocessor.save_params(artifact_dir / "preprocessor.json")
 
+        fe_cfg = self.config.get("feature_engineering", {})
+        daytime_cfg = fe_cfg.get("daytime", {})
+        weather_classifier = WeatherClassifier(
+            ci_thresholds=fe_cfg.get("ci_thresholds", [0.2, 0.6]),
+            wsi_thresholds=fe_cfg.get("wsi_thresholds", [0.3, 0.7]),
+            fusion_weights=fe_cfg.get("fusion_weights", {"ci": 0.7, "wsi": 0.3}),
+            daytime_ge_min=daytime_cfg.get("ge_min_wm2", 20.0),
+            night_handling=daytime_cfg.get("night_handling", "exclude"),
+        )
+        train_weather = weather_classifier.classify(train_df)
+        val_weather = weather_classifier.classify(val_df)
+        test_weather = weather_classifier.classify(test_df)
+        def _extract_day_mask(bundle: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
+            mask = bundle.get("day_mask")
+            return np.asarray(mask, dtype=bool) if mask is not None else None
+
+        train_day_mask = _extract_day_mask(train_weather)
+        val_day_mask = _extract_day_mask(val_weather)
+        test_day_mask = _extract_day_mask(test_weather)
+
+        with open(artifact_dir / "weather_classifier.json", "w", encoding="utf-8") as fp:
+            json.dump(
+                {
+                    "ci_thresholds": weather_classifier.ci_thresholds,
+                    "wsi_thresholds": weather_classifier.wsi_thresholds,
+                    "fusion_weights": weather_classifier.fusion_weights,
+                    "daytime_ge_min": weather_classifier.daytime_ge_min,
+                    "night_handling": weather_classifier.night_handling,
+                },
+                fp,
+                ensure_ascii=False,
+                indent=2,
+            )
+
         vmd_cfg = self.config.get("preprocessing", {}).get("vmd", {})
         vmd = VMDDecomposer(
             n_modes=vmd_cfg.get("n_modes", 5),
@@ -231,31 +279,20 @@ class WalkForwardTrainer:
             tol=vmd_cfg.get("tolerance", 1e-6),
             max_iter=vmd_cfg.get("max_iter", 500),
         )
-        train_vmd = vmd.process_dataset(train_proc)
-        val_vmd = vmd.process_dataset(val_proc)
-        test_vmd = vmd.process_dataset(test_proc)
-        vmd.save_params(artifact_dir / "vmd.pkl")
-
-        fe_cfg = self.config.get("feature_engineering", {})
-        weather_classifier = WeatherClassifier(
-            ci_thresholds=fe_cfg.get("ci_thresholds", [0.2, 0.6]),
-            wsi_thresholds=fe_cfg.get("wsi_thresholds", [0.3, 0.7]),
-            fusion_weights=fe_cfg.get("fusion_weights", {"ci": 0.7, "wsi": 0.3}),
+        apply_mask_vmd = daytime_cfg.get("apply_mask_in_vmd", False)
+        train_vmd = vmd.process_dataset(
+            train_proc,
+            day_mask=train_day_mask if apply_mask_vmd else None,
         )
-        train_weather = weather_classifier.classify(train_proc)
-        val_weather = weather_classifier.classify(val_proc)
-        test_weather = weather_classifier.classify(test_proc)
-        with open(artifact_dir / "weather_classifier.json", "w", encoding="utf-8") as fp:
-            json.dump(
-                {
-                    "ci_thresholds": weather_classifier.ci_thresholds,
-                    "wsi_thresholds": weather_classifier.wsi_thresholds,
-                    "fusion_weights": weather_classifier.fusion_weights,
-                },
-                fp,
-                ensure_ascii=False,
-                indent=2,
-            )
+        val_vmd = vmd.process_dataset(
+            val_proc,
+            day_mask=val_day_mask if apply_mask_vmd else None,
+        )
+        test_vmd = vmd.process_dataset(
+            test_proc,
+            day_mask=test_day_mask if apply_mask_vmd else None,
+        )
+        vmd.save_params(artifact_dir / "vmd.pkl")
 
         dpsr_cfg = fe_cfg.get("dpsr", {})
         dpsr = DPSR(
@@ -266,9 +303,19 @@ class WalkForwardTrainer:
             max_iter=dpsr_cfg.get("max_iter", 100),
             learning_rate=dpsr_cfg.get("learning_rate", 0.01),
         )
-        train_dpsr, _ = dpsr.fit_transform(train_vmd)
-        val_dpsr = dpsr.transform(val_vmd)
-        test_dpsr = dpsr.transform(test_vmd)
+        apply_mask_dpsr = daytime_cfg.get("apply_mask_in_dpsr", False)
+        train_dpsr, _ = dpsr.fit_transform(
+            train_vmd,
+            day_mask=train_day_mask if apply_mask_dpsr else None,
+        )
+        val_dpsr = dpsr.transform(
+            val_vmd,
+            day_mask=val_day_mask if apply_mask_dpsr else None,
+        )
+        test_dpsr = dpsr.transform(
+            test_vmd,
+            day_mask=test_day_mask if apply_mask_dpsr else None,
+        )
         dpsr.save_weights(artifact_dir / "dpsr_weights.pkl")
 
         dlfe_cfg = fe_cfg.get("dlfe", {})
@@ -280,22 +327,37 @@ class WalkForwardTrainer:
             max_iter=dlfe_cfg.get("max_iter", 100),
             tol=dlfe_cfg.get("tol", 1e-6),
         )
-        train_dlfe = dlfe.fit_transform(train_dpsr)
-        val_dlfe = dlfe.transform(val_dpsr)
-        test_dlfe = dlfe.transform(test_dpsr)
+        apply_mask_dlfe = daytime_cfg.get("apply_mask_in_dlfe", False)
+        train_dlfe = dlfe.fit_transform(
+            train_dpsr,
+            day_mask=train_day_mask if apply_mask_dlfe else None,
+        )
+        val_dlfe = dlfe.transform(
+            val_dpsr,
+            day_mask=val_day_mask if apply_mask_dlfe else None,
+        )
+        test_dlfe = dlfe.transform(
+            test_dpsr,
+            day_mask=test_day_mask if apply_mask_dlfe else None,
+        )
         dlfe.save_mapping(artifact_dir / "dlfe_mapping.pkl")
 
-        def build_feature_set(features: np.ndarray, processed_df: Any, weather: np.ndarray) -> Dict[str, np.ndarray]:
+        def build_feature_set(features: np.ndarray, processed_df: Any, weather_bundle: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
             feature_array = _sanitize_array(features)
             target_array = _sanitize_array(processed_df["power"].values.astype(np.float32))
-            weather_array = np.asarray(weather, dtype=np.int64)
-            feature_array, target_array, weather_array = _align_length(
-                [feature_array, target_array, weather_array]
+            weather_array = np.asarray(weather_bundle["labels"], dtype=np.int64)
+            day_mask_array = np.asarray(
+                weather_bundle.get("day_mask", np.ones_like(weather_array, dtype=bool)),
+                dtype=bool,
+            )
+            feature_array, target_array, weather_array, day_mask_array = _align_length(
+                [feature_array, target_array, weather_array, day_mask_array]
             )
             return {
                 "features": feature_array,
                 "targets": _sanitize_array(target_array).reshape(-1, 1),
                 "weather": weather_array,
+                "day_mask": day_mask_array.astype(bool),
             }
 
         return {
@@ -311,7 +373,7 @@ class WalkForwardTrainer:
                 continue
             state = torch.load(best_path, map_location=self.device)
             multi_model.models[weather_name].load_state_dict(state["model_state_dict"])
-            logger.info("加载 %s 的最佳权重 (%s)", weather_name, best_path.name)
+            logger.info("鍔犺浇 %s 鐨勬渶浣虫潈閲?(%s)", weather_name, best_path.name)
 
     def _evaluate_fold(
         self,
@@ -358,7 +420,7 @@ class WalkForwardTrainer:
 
         np.save(result_dir / "predictions.npy", predictions.flatten())
         np.save(result_dir / "targets.npy", targets.flatten())
-        self.logger.info("Fold %d 测试评估完成", fold_id)
+        self.logger.info("Fold %d 娴嬭瘯璇勪及瀹屾垚", fold_id)
         return payload
 
     def _capture_state(self, multi_model: MultiWeatherModel) -> Dict[str, Dict[str, torch.Tensor]]:
@@ -444,7 +506,7 @@ class WalkForwardTrainer:
             {w: model.state_dict() for w, model in multi_model.models.items()},
             checkpoint_dir / "online_learning_state.pth",
         )
-        self.logger.info("Fold %d 在线学习完成，共执行 %d 次参数更新", fold_id, updates)
+        self.logger.info('Fold %d 在线学习完成，共执行 %d 次参数更新', fold_id, updates)
         return {
             "updates": updates,
             "average_loss": {w: float(np.mean(loss_list)) if loss_list else None for w, loss_list in losses.items()},

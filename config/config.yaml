@@ -68,6 +68,12 @@ feature_engineering:
   fusion_weights:
     ci: 0.7
     wsi: 0.3
+  daytime:
+    ge_min_wm2: 20.0
+    night_handling: exclude
+    apply_mask_in_vmd: true
+    apply_mask_in_dpsr: true
+    apply_mask_in_dlfe: true
   dpsr:
     embedding_dim: 30
     neighborhood_size: 20

@@ -39,7 +39,9 @@ class WeatherClassifier:
                  elevation: float = 1500,  # 海拔高度(米)
                  ci_thresholds: List[float] = [0.2, 0.6],
                  wsi_thresholds: List[float] = [0.3, 0.7],
-                 fusion_weights: Dict[str, float] = {'ci': 0.7, 'wsi': 0.3}):
+                 fusion_weights: Dict[str, float] = {'ci': 0.7, 'wsi': 0.3},
+                 daytime_ge_min: float = 20.0,
+                 night_handling: str = "exclude"):
         """
         初始化天气分类器
 
@@ -70,6 +72,16 @@ class WeatherClassifier:
             'wsi': fusion_weights['wsi'] / total_weight
         }
 
+        # 白天判定阈值与夜间处理策略
+        self.daytime_ge_min = float(daytime_ge_min)
+        night_handling = night_handling.lower()
+        if night_handling not in {"exclude", "assign-cloudy"}:
+            raise ValueError(f"night_handling 仅支持 'exclude' 或 'assign-cloudy'，收到: {night_handling}")
+        self.night_handling = night_handling
+
+        # 最近一次 classify 时的白天掩码缓存
+        self.last_day_mask: Optional[np.ndarray] = None
+
         # 太阳常数
         self.solar_constant = 1367.0  # W/m²
 
@@ -84,7 +96,7 @@ class WeatherClassifier:
                    f"海拔{elevation}m")
 
     def calculate_ci(self, ghi: Union[float, np.ndarray],
-                    timestamp: Union[datetime, pd.DatetimeIndex]) -> Union[float, np.ndarray]:
+                    timestamp: Union[datetime, pd.DatetimeIndex]) -> Tuple[Union[float, np.ndarray], Union[bool, np.ndarray]]:
         """
         计算清晰度指数CI
 
@@ -96,21 +108,36 @@ class WeatherClassifier:
             timestamp: 时间戳
 
         Returns:
-            CI值或CI数组
+            Tuple[CI值/数组, 白天掩码]
         """
         # 计算理论地外辐照度
         ge = self._calculate_extraterrestrial_radiation(timestamp)
 
-        # 避免除零
-        ge = np.where(ge > 0, ge, 1e-6)
+        ghi_arr = np.asarray(ghi, dtype=float)
+        ge_arr = np.asarray(ge, dtype=float)
 
-        # 计算CI
-        ci = ghi / ge
+        # 白天判定：GE 超过阈值视为白天
+        day_mask = ge_arr >= self.daytime_ge_min
 
-        # 限制CI范围在[0, 1.2]
-        ci = np.clip(ci, 0, 1.2)
+        # 避免除零，仅对白天样本计算
+        safe_ge = np.where(day_mask, ge_arr, 1.0)
+        ci = np.full_like(ge_arr, np.nan, dtype=float)
+        valid_mask = day_mask & (safe_ge > 0)
+        if np.any(valid_mask):
+            ci[valid_mask] = np.clip(ghi_arr[valid_mask] / safe_ge[valid_mask], 0, 1.2)
 
-        return ci
+        day_mask_bool = day_mask.astype(bool)
+        if isinstance(day_mask_bool, np.ndarray) and day_mask_bool.ndim > 0:
+            self.last_day_mask = day_mask_bool.copy()
+            day_mask_out: Union[np.ndarray, bool] = day_mask_bool
+        else:
+            day_flag = bool(np.asarray(day_mask_bool))
+            self.last_day_mask = np.array([day_flag])
+            day_mask_out = day_flag
+
+        if isinstance(ci, np.ndarray) and ci.ndim == 0:
+            return float(ci), day_mask_out
+        return ci, day_mask_out
 
     def _calculate_extraterrestrial_radiation(self,
                                              timestamp: Union[datetime, pd.DatetimeIndex]) -> np.ndarray:
@@ -308,51 +335,91 @@ class WeatherClassifier:
                 ghi_col: str = 'irradiance',
                 pressure_col: str = 'pressure',
                 humidity_col: str = 'humidity',
-                temperature_col: str = 'temperature') -> np.ndarray:
+                temperature_col: str = 'temperature') -> Dict[str, np.ndarray]:
         """
-        双路径融合天气分类
+        双路径融合天气分类，并返回白天掩码与路径信息。
 
         Args:
-            data: 输入数据，需要包含辐照度、气压、湿度、温度列
-            ghi_col: 辐照度列名
-            pressure_col: 气压列名
-            humidity_col: 湿度列名
-            temperature_col: 温度列名
+            data: 输入数据，要求包含辐照度、气压、湿度、温度列且索引为 DatetimeIndex。
+            ghi_col: 辐照度列名。
+            pressure_col: 气压列名。
+            humidity_col: 湿度列名。
+            temperature_col: 温度列名。
 
         Returns:
-            天气分类结果数组
+            包含标签、白天掩码及路径诊断信息的字典。
         """
-        # 检查必需列
         required_cols = [ghi_col, pressure_col, humidity_col, temperature_col]
         missing_cols = [col for col in required_cols if col not in data.columns]
         if missing_cols:
-            raise ValueError(f"数据缺少必需列: {missing_cols}")
+            raise ValueError(f"缺少必要数据列: {missing_cols}")
 
-        # 确保有时间索引
         if not isinstance(data.index, pd.DatetimeIndex):
-            raise ValueError("数据必须有DatetimeIndex时间索引")
+            raise ValueError('数据索引需为 DatetimeIndex 时间索引')
 
-        # 路径1：计算CI
-        ci_values = self.calculate_ci(data[ghi_col].values, data.index)
-        ci_weather = self.classify_ci(ci_values)
-
-        # 路径2：计算WSI
+        ci_values, day_mask = self.calculate_ci(data[ghi_col].values, data.index)
         wsi_values = self.calculate_wsi(
             data[pressure_col].values,
             data[humidity_col].values,
             data[temperature_col].values
         )
-        wsi_weather = self.classify_wsi(wsi_values)
 
-        # 融合决策
-        weather_types = self._fusion_decision(ci_weather, wsi_weather, ci_values, wsi_values)
+        ci_arr = np.asarray(ci_values, dtype=float)
+        wsi_arr = np.asarray(wsi_values, dtype=float)
+        day_arr = np.asarray(day_mask, dtype=bool)
 
-        # 日志统计
-        unique, counts = np.unique(weather_types, return_counts=True)
-        weather_dist = {self.weather_types[i]: count for i, count in zip(unique, counts)}
-        logger.info(f"天气分类完成: {weather_dist}")
+        if ci_arr.ndim == 0:
+            ci_arr = ci_arr.reshape(1)
+            wsi_arr = wsi_arr.reshape(1)
+            day_arr = day_arr.reshape(1)
 
-        return weather_types
+        n_samples = ci_arr.shape[0]
+        ci_path = np.full(n_samples, -1, dtype=int)
+        wsi_path = np.full(n_samples, -1, dtype=int)
+
+        day_indices = np.where(day_arr)[0]
+        if day_indices.size:
+            ci_path_day = np.asarray(self.classify_ci(ci_arr[day_indices]), dtype=int)
+            wsi_path_day = np.asarray(self.classify_wsi(wsi_arr[day_indices]), dtype=int)
+            ci_path[day_indices] = ci_path_day
+            wsi_path[day_indices] = wsi_path_day
+
+        final_labels = np.full(n_samples, -1, dtype=int)
+        if day_indices.size:
+            fused = self._fusion_decision(
+                ci_path[day_indices],
+                wsi_path[day_indices],
+                ci_arr[day_indices],
+                wsi_arr[day_indices]
+            )
+            final_labels[day_indices] = fused
+
+        if self.night_handling == 'assign-cloudy':
+            final_labels[~day_arr] = 1
+
+        day_labels = final_labels[day_arr]
+        stats = self.get_weather_statistics(day_labels) if day_labels.size else {
+            'distribution': {},
+            'percentages': {},
+            'transitions': 0
+        }
+
+        logger.info('天气分类分布(白天末端): %s', stats.get('distribution', {}))
+
+        if isinstance(day_arr, np.ndarray):
+            self.last_day_mask = day_arr.copy()
+        else:
+            self.last_day_mask = np.array([bool(day_arr)])
+
+        return {
+            'labels': final_labels,
+            'day_mask': day_arr,
+            'ci': ci_arr,
+            'wsi': wsi_arr,
+            'ci_path': ci_path,
+            'wsi_path': wsi_path,
+            'statistics': stats,
+        }
 
     def _fusion_decision(self, ci_weather: np.ndarray, wsi_weather: np.ndarray,
                         ci_values: np.ndarray, wsi_values: np.ndarray) -> np.ndarray:
@@ -452,8 +519,17 @@ class WeatherClassifier:
         Returns:
             统计信息字典
         """
-        unique, counts = np.unique(weather_types, return_counts=True)
-        total = len(weather_types)
+        weather_arr = np.asarray(weather_types, dtype=int)
+        weather_arr = weather_arr[weather_arr >= 0]
+        if weather_arr.size == 0:
+            return {
+                'distribution': {},
+                'percentages': {},
+                'transitions': 0
+            }
+
+        unique, counts = np.unique(weather_arr, return_counts=True)
+        total = weather_arr.size
 
         stats = {
             'distribution': {},
