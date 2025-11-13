@@ -2,6 +2,27 @@
 
 本文档记录DLFE-LSTM-WSI项目的所有重要变更和git id方便回溯。
 
+## [0.5.6] - 2025-11-13 - 白天片段特征支持与诊断增强
+- Commit: 2ecf95b
+
+### ✨ 白天片段分段特征处理（BREAKING CHANGE）
+- **VMD/DPSR/DLFE全流程支持 day_mask，只对白天片段进行特征分解/重构，夜间自动填充0或剔除，提高时序建模鲁棒性。
+- **main.py/训练流程** 完全适配 daytime mask，特征缓存、训练、Walk-Forward 评估等全链路生效。
+
+### 🛠️ 诊断与工具完善
+- **diagnose_weather.py** 支持CI/WSI网格阈值自动搜索，分析指标统计更细致，便于实际工程部署配置。
+- **AGENTS.md** 新增 codex 的开发规范、常用命令与贡献指南，提升团队协作同时便于新成员快速入门。
+
+### 🐛 Bug修复与健壮性优化
+- 修正部分极端情况日志丢失与参数类型报错，增强边界兼容性。
+- 特征工程、模型训练、缓存加载异常捕获与提示更完善。
+
+### 📋 涉及文件
+- main.py, config/config.yaml, src/data_processing/vmd_decomposer.py, src/feature_engineering/dlfe.py, src/feature_engineering/dpsr.py, src/feature_engineering/weather_classifier.py, src/training/trainer.py, src/training/walk_forward_trainer.py, AGENTS.md, scripts/diagnose_weather.py, README.md, src/utils/__init__.py
+
+### 🎯 兼容性与操作提示
+- 重要：本更新涉及特征缓存格式重大升级，升级后请务必使用 `python main.py prepare --force-rebuild` 重算数据特征，否则后续训练将因缓存不兼容报错。
+
 ## [0.5.5] - 2025-10-30 - 服务器优化改进合并
 - Commit: e81aba2
 
