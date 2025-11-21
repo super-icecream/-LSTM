@@ -545,10 +545,13 @@ class WalkForwardTrainer:
             num_workers=num_workers,
             device=device,
             logger=self.logger,
+            prated=self.config.get("evaluation", {}).get("prated"),
         )
 
         weather_distribution = export_weather_distribution(test_sequence.get("weather", np.array([])))
-        evaluation_tool = PerformanceMetrics(device=str(device))
+        evaluation_tool = PerformanceMetrics(
+            device=str(device), prated=self.config.get("evaluation", {}).get("prated")
+        )
         multi_horizon_metrics = evaluation_tool.evaluate_multi_horizon(
             multi_model.models,
             test_sequence,

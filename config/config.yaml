@@ -137,6 +137,7 @@ adaptive:
 
 evaluation:
   device: auto
+  prated: 50            # 机组装机容量（MW）
   # Multi-horizon forecasts: 15/30/60 minutes (15 min per step)
   horizons: [1, 2, 4]
   metrics: [RMSE, MAE, NRMSE]

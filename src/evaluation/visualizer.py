@@ -792,7 +792,8 @@ class ModelEvaluator:
         config = config or {}
         
         self.metrics = PerformanceMetrics(
-            device=config.get('device', 'cuda')
+            device=config.get('device', 'cuda'),
+            prated=config.get('prated')
         )
         self.visualizer = PerformanceVisualizer(
             figsize=config.get('figsize', (12, 8)),

@@ -815,8 +815,9 @@ def evaluate_multi_weather_model(
     num_workers: int,
     device: torch.device,
     logger,
+    prated: Optional[float] = None,
 ) -> Tuple[PerformanceMetrics, Dict[str, PerformanceMetrics], np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
-    metrics_tool = PerformanceMetrics(device=str(device))
+    metrics_tool = PerformanceMetrics(device=str(device), prated=prated)
     features = sequence_set["features"]
     targets = sequence_set["targets"]
     weather = sequence_set.get("weather")
@@ -1003,13 +1004,16 @@ def run_train(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logg
         num_workers=num_workers,
         device=trainer.device,
         logger=logger,
+        prated=config.get("evaluation", {}).get("prated"),
     )
 
     if paths.results is None:
         raise RuntimeError("无法解析结果输出目录")
     weather_counts = export_weather_distribution(sequence_sets["test"].get("weather", np.array([])))
 
-    evaluation_tool = PerformanceMetrics(device=str(trainer.device))
+    evaluation_tool = PerformanceMetrics(
+        device=str(trainer.device), prated=config.get("evaluation", {}).get("prated")
+    )
     multi_horizon_metrics = evaluation_tool.evaluate_multi_horizon(
         multi_model.models,
         sequence_sets["test"],
@@ -1097,11 +1101,14 @@ def run_test(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logge
         num_workers=num_workers,
         device=eval_device,
         logger=logger,
+        prated=config.get("evaluation", {}).get("prated"),
     )
 
     weather_counts = export_weather_distribution(sequence_sets["test"].get("weather", np.array([])))
 
-    evaluation_tool = PerformanceMetrics(device=str(eval_device))
+    evaluation_tool = PerformanceMetrics(
+        device=str(eval_device), prated=config.get("evaluation", {}).get("prated")
+    )
     multi_horizon_metrics = evaluation_tool.evaluate_multi_horizon(
         multi_model.models,
         sequence_sets["test"],

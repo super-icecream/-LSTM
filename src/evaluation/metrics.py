@@ -29,10 +29,11 @@ class MetricsResult:
     std_error: float = 0.0
     max_error: float = 0.0
     min_error: float = 0.0
+    nrmse_cap: Optional[float] = None  # 以装机容量归一化的 NRMSE
 
     def to_dict(self) -> Dict:
         """转换为字典格式"""
-        return {
+        data = {
             "RMSE": self.rmse,
             "MAE": self.mae,
             "NRMSE": self.nrmse,
@@ -41,10 +42,16 @@ class MetricsResult:
             "MAX_ERROR": self.max_error,
             "MIN_ERROR": self.min_error,
         }
+        if self.nrmse_cap is not None:
+            data["NRMSE_cap"] = self.nrmse_cap
+        return data
 
     def __str__(self) -> str:
         """格式化输出"""
-        return f"RMSE: {self.rmse:.4f} | MAE: {self.mae:.4f} | NRMSE: {self.nrmse:.4f}"
+        parts = [f"RMSE: {self.rmse:.4f}", f"MAE: {self.mae:.4f}", f"NRMSE: {self.nrmse:.4f}"]
+        if self.nrmse_cap is not None:
+            parts.append(f"NRMSE_cap: {self.nrmse_cap:.4f}")
+        return " | ".join(parts)
 
 
 class PerformanceMetrics:
@@ -54,9 +61,10 @@ class PerformanceMetrics:
     - RMSE: 均方根误差
     - MAE: 平均绝对误差
     - NRMSE: 归一化均方根误差
+    - NRMSE_cap: 以装机容量归一化的均方根误差
     """
 
-    def __init__(self, device: str = "cuda", epsilon: float = 1e-8):
+    def __init__(self, device: str = "cuda", epsilon: float = 1e-8, prated: Optional[float] = None):
         """
         初始化评估器
 
@@ -66,6 +74,7 @@ class PerformanceMetrics:
         """
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.epsilon = epsilon
+        self.prated = prated
         self.results_history: List[MetricsResult] = []
 
         if self.device.type == "cuda":
@@ -137,6 +146,7 @@ class PerformanceMetrics:
         predictions: Union[torch.Tensor, np.ndarray],
         targets: Union[torch.Tensor, np.ndarray],
         calculate_ci: bool = True,
+        prated: Optional[float] = None,
     ) -> MetricsResult:
         """
         计算所有评估指标
@@ -144,6 +154,7 @@ class PerformanceMetrics:
             predictions: 预测值
             targets: 真实值
             calculate_ci: 是否计算置信区间
+            prated: 装机容量，若提供则计算 NRMSE_cap
         """
         predictions = self._ensure_tensor(predictions)
         targets = self._ensure_tensor(targets)
@@ -151,6 +162,14 @@ class PerformanceMetrics:
         rmse = self.calculate_rmse(predictions, targets)
         mae = self.calculate_mae(predictions, targets)
         nrmse = self.calculate_nrmse(predictions, targets)
+
+        nrmse_cap: Optional[float] = None
+        effective_prated = prated if prated is not None else self.prated
+        if effective_prated is not None:
+            if effective_prated <= self.epsilon:
+                logger.warning("prated 太小，无法计算 NRMSE_cap (prated=%.6f)", effective_prated)
+            else:
+                nrmse_cap = rmse / effective_prated
 
         errors = (predictions - targets).cpu().numpy()
         std_error = float(np.std(errors))
@@ -170,6 +189,7 @@ class PerformanceMetrics:
             std_error=std_error,
             max_error=max_error,
             min_error=min_error,
+            nrmse_cap=nrmse_cap,
         )
         self.results_history.append(result)
         return result
@@ -194,7 +214,9 @@ class PerformanceMetrics:
 
         results: Dict[int, MetricsResult] = {}
 
-        for horizon in horizons:
+        # 按 horizons 的索引取列，避免将“步长值”误当作列号导致高步长被跳过
+        horizons = list(horizons)
+        for idx, horizon in enumerate(horizons):
             horizon_preds = []
             horizon_targets = []
 
@@ -210,18 +232,32 @@ class PerformanceMetrics:
                 target_slice = torch.from_numpy(targets[mask]).float().to(self.device)
 
                 if target_slice.dim() > 1:
-                    if horizon <= target_slice.shape[1]:
-                        target_slice = target_slice[:, horizon - 1]
-                    else:
+                    if target_slice.shape[1] <= idx:
+                        logger.warning(
+                            "multi-horizon 跳过目标列，weather=%s horizon=%d 目标维度不足(%d)",
+                            weather_name,
+                            horizon,
+                            target_slice.shape[1],
+                        )
                         continue
+                    target_slice = target_slice[:, idx]
 
                 with torch.no_grad():
                     with torch.cuda.amp.autocast():
                         output, _ = model(feature_slice)
 
-                if output.dim() > 1 and output.shape[1] < horizon:
-                    continue
-                pred_slice = output[:, horizon - 1] if output.dim() > 1 else output
+                if output.dim() > 1:
+                    if output.shape[1] <= idx:
+                        logger.warning(
+                            "multi-horizon 跳过预测列，weather=%s horizon=%d 预测维度不足(%d)",
+                            weather_name,
+                            horizon,
+                            output.shape[1],
+                        )
+                        continue
+                    pred_slice = output[:, idx]
+                else:
+                    pred_slice = output
                 horizon_preds.append(pred_slice)
                 horizon_targets.append(target_slice)
             if horizon_preds:
