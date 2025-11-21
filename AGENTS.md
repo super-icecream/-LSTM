@@ -8,7 +8,7 @@
 - `experiments/` 用于保存 Walk-Forward 记录与指标，`docs/` 存放论文与架构材料，`scripts/` 聚合 CLI 工具（prepare/train/evaluate/diagnose），`tests/` 维护单元测试。
 
 ## 构建、测试与开发命令
-- 激活环境：`conda activate C:\Users\Administrator\桌面\专利\DLFE-LSTM-WSI\.conda`，或运行 `bash environment/setup_env.sh --cpu` 以安装依赖。
+ - 激活环境：`conda activate "C:\Users\Administrator\桌面\专利\DLFE-LSTM-WSI\.conda"`，或运行 `bash environment/setup_env.sh --cpu` 以安装依赖。
 - 标准流程：
 ```bash
 python main.py prepare --run-name demo   # 清洗并缓存
@@ -41,3 +41,27 @@ python -m unittest tests.test_feature_engineering
 - 复制 `.env.example` 到本地 `.env`，仅在其中写入最小化凭据；任何密钥不得进入 Git。
 - 在 `config/data_config.yaml` 中声明绝对路径时优先使用相对路径或环境变量，避免在团队服务器泄露个人目录。
 - 大型实验请使用 `scripts/run_experiment.sh`，其中已对 GPU 显存与缓存清理做保护；提交前清理 `__pycache__` 及临时文件。
+
+## 当前研究问题
+
+  - CI/WSI 天气识别高度依赖人为设定的阈值。首轮训练缺乏可靠先验时，容易将白天样本几乎全部划入同一类别（如全部判为阴天），导致三路 LSTM 子模型的训练样本极度不平衡，最小类样 
+  本守卫频繁触发，训练流程被迫暂停。
+  - 阈值网格搜索与多次 Walk-Forward 反复校准耗费大量计算资源与时间，影响工程推进效率。
+
+  ## 正在探索的方向
+
+  1. **基于聚类的阈值冷启动**
+     - 对白天样本（GE≥20 W/m² 或太阳高度≥5°）构建聚类特征：归一化功率（P/GE 或 P/装机容量）、CI/GHI、温度、气压、湿度及其变化率等。
+     - 采用稳健、可解释的 3 簇聚类算法（候选：KMeans/KMedoids、GMM、HDBSCAN、DTW 或 K-shape 等）将样本分为高功率/中功率/低功率三簇，并按簇内平均功率映射到晴/多云/阴。      
+     - 统计各簇 CI/WSI 分布，以簇与簇的分位点或均值中点反推出首轮 CI/WSI 阈值，提供“自动化初始划分”。
+
+  2. **工程化落地**
+     - 在 `prepare` 阶段新增阈值初始化脚本（计划放在 `scripts/init_thresholds.py` 或复用 `scripts.diagnose_weather`），确保首次运行即可产出阈值与样本量日志。
+     - 将聚类产生的阈值写入 `config/feature_engineering`，并记录“晴/多云/阴样本数 + 阈值来源”以保证可追溯性。
+     - 维持既有误差反馈机制：聚类仅负责冷启动，训练期间仍按在线自适应规则微调 CI/WSI 权重与边界。
+
+  3. **后续验证**
+     - 对不同站点（甘肃、河北等）进行对比实验，评估聚类阈值的稳定性与对 Walk-Forward 结果的影响。
+     - 若聚类结果对特定季节/站点仍存在类别稀缺，考虑引入白天覆盖率权重、季节性分层或自适应簇数（例如 X-means、GMM-BIC）。
+
+  复制完毕即可，无需我继续操作。

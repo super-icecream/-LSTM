@@ -46,7 +46,7 @@ class ModelBuilder:
                 'input_dim': 30,
                 'hidden_dims': [100, 50],
                 'dropout_rates': [0.3, 0.2],
-                'output_dim': 1,
+                'output_dim': 3,
                 'sequence_length': 24
                 # batch_size 交由 DataLoader 管理
             }

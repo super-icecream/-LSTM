@@ -79,31 +79,7 @@ def diagnose_matrix_sparsity(matrix: np.ndarray, name: str = "Matrix") -> Dict:
         "savings_ratio": float(savings_ratio),
     }
 
-    diag_logger = logging.getLogger(__name__)
-    diag_logger.info("=" * 70)
-    diag_logger.info(f"📊 {name} 稀疏性诊断报告")
-    diag_logger.info("=" * 70)
-    diag_logger.info(f"矩阵形状: {n} × {m}")
-    diag_logger.info(f"总元素数: {total_elements:,}")
-    diag_logger.info(f"非零元素: {nonzero_elements:,}")
-    diag_logger.info(f"稀疏度: {sparsity * 100:.2f}%")
-    diag_logger.info(f"每行非零元素: 平均={avg_nonzero_per_row:.1f}, 最大={max_nonzero_per_row}, 最小={min_nonzero_per_row}")
-    diag_logger.info("")
-    diag_logger.info("💾 内存占用估算:")
-    diag_logger.info(f"  密集存储 (float64): {dense_memory_gb:.2f} GB")
-    diag_logger.info(f"  稀疏存储 (COO):     {sparse_memory_mb:.2f} MB")
-    diag_logger.info(f"  节省比例:           {savings_ratio:.1f}x")
-    diag_logger.info("")
-
     should_use_sparse = sparsity > 0.9 and dense_memory_gb > 1.0
-    if should_use_sparse:
-        diag_logger.info("✅ 推荐使用稀疏矩阵优化！")
-        diag_logger.info(f"   理由: 稀疏度={sparsity * 100:.1f}%, 密集存储需要={dense_memory_gb:.2f}GB")
-    else:
-        diag_logger.info("⚠️  稀疏矩阵优化收益不明显")
-        diag_logger.info(f"   理由: 稀疏度={sparsity * 100:.1f}%, 密集存储仅需={dense_memory_gb:.2f}GB")
-
-    diag_logger.info("=" * 70)
 
     result["should_use_sparse"] = should_use_sparse
     return result
@@ -233,16 +209,23 @@ class DLFE:
 
         n_samples, n_features = X.shape
 
-        # 如果提供了权重，进行加权
+        # 如果提供了权重，进行长度校验；不匹配则忽略（防止 9 vs 30 等维度错配）
         if weights is not None:
-            if len(weights.shape) == 1:
-                # 一维权重，广播到所有特征
+            try:
+                wlen = int(getattr(weights, "shape", [None])[-1])
+            except Exception:
+                wlen = None
+            if wlen != n_features:
+                logger.warning("DLFE CPU: ignore weights length=%s mismatching features=%d", wlen, n_features)
+                weights = None
+        # 加权
+        if weights is None:
+            X_weighted = X
+        else:
+            if getattr(weights, "ndim", 1) == 1:
                 X_weighted = X * np.sqrt(weights.reshape(1, -1))
             else:
-                # 多维权重（每个样本不同权重）
                 X_weighted = X * np.sqrt(weights)
-        else:
-            X_weighted = X
 
         # 计算欧氏距离矩阵
         # 使用广播计算所有点对的距离
@@ -303,15 +286,22 @@ class DLFE:
         with torch_module.no_grad():
             X_gpu = torch_module.as_tensor(X, dtype=torch_module.double, device=device)
 
+            # 权重长度兜底：不匹配则忽略
             if weights is not None:
-                if weights.ndim == 1:
-                    weights_gpu = torch_module.as_tensor(weights, dtype=torch_module.double, device=device)
-                    X_weighted = X_gpu * torch_module.sqrt(weights_gpu.view(1, -1))
-                else:
-                    weights_gpu = torch_module.as_tensor(weights, dtype=torch_module.double, device=device)
-                    X_weighted = X_gpu * torch_module.sqrt(weights_gpu)
-            else:
+                try:
+                    wlen = int(getattr(weights, "shape", [None])[-1])
+                except Exception:
+                    wlen = None
+                expected = int(X_gpu.shape[1])
+                if wlen != expected:
+                    logger.warning("DLFE GPU: ignore weights length=%s mismatching features=%d", wlen, expected)
+                    weights = None
+
+            if weights is None:
                 X_weighted = X_gpu
+            else:
+                weights_gpu = torch_module.as_tensor(weights, dtype=torch_module.double, device=device)
+                X_weighted = X_gpu * torch_module.sqrt(weights_gpu.view(1, -1) if weights_gpu.ndim == 1 else torch_module.sqrt(weights_gpu))
 
             norm_all = torch_module.sum(X_weighted ** 2, dim=1, keepdim=True).T
 
@@ -893,12 +883,12 @@ class DLFE:
             dpsr_weights: Optional[Union[np.ndarray, Dict]] = None,
             day_mask: Optional[Union[np.ndarray, List[bool]]] = None) -> 'DLFE':
         """
-        ??????????? A?
+        训练映射矩阵 A。
 
         Args:
-            X_train: ???? (n_samples x n_features)
-            dpsr_weights: ?? DPSR ?????
-            day_mask: ?????True ??????
+            X_train: 训练数据 (n_samples x n_features)
+            dpsr_weights: 可选，来自 DPSR 的特征权重
+            day_mask: 可选，True 表示白天样本，仅对白天样本训练
 
         Returns:
             self
@@ -914,17 +904,17 @@ class DLFE:
             mask_array = np.asarray(day_mask, dtype=bool).reshape(-1)
             if mask_array.shape[0] != n_samples:
                 raise ValueError(
-                    f"DLFE day_mask ??({mask_array.shape[0]}) ????({n_samples}) ???"
+                    f"DLFE day_mask 长度({mask_array.shape[0]}) 与数据行数({n_samples}) 不一致"
                 )
             valid_idx = np.where(mask_array)[0]
             if not valid_idx.size:
-                raise ValueError("DLFE fit: day_mask ??????????")
+                raise ValueError("DLFE fit: day_mask 没有有效样本")
             X = X[valid_idx]
             n_samples = X.shape[0]
         else:
             valid_idx = None
 
-        logger.info(f"??DLFE??: {n_samples}??, {n_features}?? -> {self.target_dim}?")
+        logger.info("DLFE fit: samples=%d, features=%d -> target_dim=%d", n_samples, n_features, self.target_dim)
 
         if dpsr_weights is not None:
             if isinstance(dpsr_weights, dict):
@@ -938,27 +928,32 @@ class DLFE:
         else:
             avg_weights = None
 
-        logger.info("???????...")
+        # Guard: if provided weights length != n_features, ignore to avoid mismatch
+        if avg_weights is not None:
+            try:
+                wlen = avg_weights.shape[-1]
+            except Exception:
+                wlen = None
+            if wlen != n_features:
+                logger.warning("DLFE: ignore DPSR weights length=%s mismatching features=%d", wlen, n_features)
+                avg_weights = None
+
+        logger.info("Building similarity matrix ...")
         Q = self.build_similarity_matrix(X, weights=avg_weights, k_neighbors=min(50, n_samples - 1))
 
-        logger.info("????????...")
+        logger.info("Constructing Laplacian ...")
         L = self.construct_laplacian(Q)
 
-        logger.info("\n?????????...")
-        Q_diagnosis = diagnose_matrix_sparsity(Q, "????? Q")
-        L_diagnosis = diagnose_matrix_sparsity(L, "?????? L")
-        L_diagnosis = diagnose_matrix_sparsity(L, "?????? L")
+        logger.info("Diagnosing sparsity ...")
+        Q_diagnosis = diagnose_matrix_sparsity(Q, "Similarity Q")
+        L_diagnosis = diagnose_matrix_sparsity(L, "Graph Laplacian L")
         self._sparsity_diagnosis = {
             "Q": Q_diagnosis,
             "L": L_diagnosis,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
-        if L_diagnosis["should_use_sparse"]:
-            logger.warning("??  ????????? L ?????")
-            logger.warning("    ???????????? %.2f GB GPU ???", L_diagnosis["dense_memory_gb"])
-            logger.warning("    ????????????? %.2f MB?", L_diagnosis["sparse_memory_mb"])
-            logger.warning("    ??? %.1fx ???", L_diagnosis["savings_ratio"])
-            logger.warning("    ??? %.1fx ???", L_diagnosis["savings_ratio"])
+        if Q_diagnosis["should_use_sparse"] or L_diagnosis["should_use_sparse"]:
+            logger.info("Sparse matrix optimization enabled (auto-detected)")
         if self.use_gpu and self._torch is not None:
             import gc
 
@@ -966,29 +961,29 @@ class DLFE:
             if self._torch.cuda.is_available():
                 self._torch.cuda.empty_cache()
                 allocated = self._torch.cuda.memory_allocated() / 1024 ** 3
-                logger.info("? ???????GPU - ???: %.2f GB", allocated)
+                logger.info("GPU memory allocated: %.2f GB", allocated)
 
-        logger.info("??ADMM??...")
+        logger.info("Starting ADMM iterations ...")
         if self.use_gpu and self._torch is not None:
-            logger.info("DLFE ??GPU????ADMM??")
+            logger.info("DLFE using GPU ADMM")
             self.mapping_matrix = self._admm_optimization_gpu(X, L)
         else:
-            logger.info("DLFE ??CPU????ADMM??")
+            logger.info("DLFE using CPU ADMM")
             self.mapping_matrix = self.admm_optimization(X, L)
 
         self.is_fitted = True
 
-        logger.info(f"DLFE???????????: {self.mapping_matrix.shape}")
+        logger.info(f"DLFE mapping matrix shape: {self.mapping_matrix.shape}")
 
         return self
     def transform(self,
                  X: Union[np.ndarray, pd.DataFrame],
                  day_mask: Optional[Union[np.ndarray, List[bool]]] = None) -> np.ndarray:
         """
-        ?????????????????
+        将输入特征映射到低维表示。
         """
         if not self.is_fitted:
-            raise RuntimeError("????fit????????")
+            raise RuntimeError("请先调用 fit 再 transform")
 
         if isinstance(X, pd.DataFrame):
             X_array = X.values
@@ -1001,7 +996,7 @@ class DLFE:
             mask_array = np.asarray(day_mask, dtype=bool).reshape(-1)
             if mask_array.shape[0] != original_n_samples:
                 raise ValueError(
-                    f"DLFE day_mask ??({mask_array.shape[0]}) ????({original_n_samples}) ???"
+                    f"DLFE day_mask 长度({mask_array.shape[0]}) 与数据行数({original_n_samples}) 不一致"
                 )
             valid_idx = np.where(mask_array)[0]
             if not valid_idx.size:
@@ -1011,7 +1006,7 @@ class DLFE:
             valid_idx = np.arange(original_n_samples)
 
         if X_array.shape[1] != self.mapping_matrix.shape[0]:
-            raise ValueError(f"???????: ??{X_array.shape[1]}?, ??{self.mapping_matrix.shape[0]}?")
+            raise ValueError(f"特征维度不匹配: 输入{X_array.shape[1]}维, 映射矩阵期望{self.mapping_matrix.shape[0]}维")
 
         F = X_array @ self.mapping_matrix
         full_F = np.zeros((original_n_samples, F.shape[1]), dtype=F.dtype)
@@ -1023,7 +1018,7 @@ class DLFE:
                      dpsr_weights: Optional[Union[np.ndarray, Dict]] = None,
                      day_mask: Optional[Union[np.ndarray, List[bool]]] = None) -> np.ndarray:
         """
-        ?? fit + transform????????
+        一次性完成 fit + transform，返回低维特征。
         """
         self.fit(X_train, dpsr_weights, day_mask=day_mask)
         return self.transform(X_train, day_mask=day_mask)

@@ -173,6 +173,8 @@ def grid_search_thresholds(
                         ci_thresholds=[float(ci_low), float(ci_high)],
                         wsi_thresholds=[float(wsi_low), float(wsi_high)],
                         daytime_ge_min=ge_min,
+                        daytime_mode=str(config.get("feature_engineering", {}).get("daytime", {}).get("mode", "ghi")).lower(),
+                        daytime_ghi_min=float(config.get("feature_engineering", {}).get("daytime", {}).get("ghi_min_wm2", 5.0)),
                     )
                     ci, wsi, ci_cls, wsi_cls, fused, day_mask = compute_ci_wsi_and_labels(train_raw, clf)
                     day_points = day_mask.astype(bool)
@@ -249,11 +251,18 @@ def main():
     # 浣跨敤鍘熼厤缃槇鍊煎厛鍋氫竴娆¤瘖鏂?
     fe_cfg = config.get("feature_engineering", {})
     daytime_cfg = fe_cfg.get("daytime", {})
+    loc_cfg = config.get("data", {}).get("location", {}) or {}
     clf = WeatherClassifier(
+        location_lat=float(loc_cfg.get("lat", 38.5)),
+        location_lon=float(loc_cfg.get("lon", 105.0)),
+        elevation=float(loc_cfg.get("elevation", 1500.0)),
+        time_zone_hours=float(loc_cfg.get("time_zone_hours", 8.0)),
         ci_thresholds=fe_cfg.get("ci_thresholds", [0.2, 0.6]),
         wsi_thresholds=fe_cfg.get("wsi_thresholds", [0.3, 0.7]),
         fusion_weights=fe_cfg.get("fusion_weights", {"ci": 0.7, "wsi": 0.3}),
         daytime_ge_min=daytime_cfg.get("ge_min_wm2", args.ge_min),
+        daytime_mode=str(daytime_cfg.get("mode", "ghi")).lower(),
+        daytime_ghi_min=float(daytime_cfg.get("ghi_min_wm2", 5.0)),
         night_handling=daytime_cfg.get("night_handling", "exclude"),
     )
 

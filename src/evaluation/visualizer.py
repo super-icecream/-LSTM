@@ -215,9 +215,8 @@ class PerformanceVisualizer:
         if show_metrics:
             rmse = np.sqrt(np.mean((predictions - targets) ** 2))
             mae = np.mean(np.abs(predictions - targets))
-            r2 = 1 - np.sum((targets - predictions) ** 2) / np.sum((targets - np.mean(targets)) ** 2)
             
-            metrics_text = f'RMSE: {rmse:.2f} kW | MAE: {mae:.2f} kW | R²: {r2:.3f}'
+            metrics_text = f'RMSE: {rmse:.2f} kW | MAE: {mae:.2f} kW'
             ax1.text(0.02, 0.98, metrics_text, transform=ax1.transAxes,
                     fontsize=10, verticalalignment='top',
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
@@ -401,12 +400,10 @@ class PerformanceVisualizer:
             lr = LinearRegression()
             lr.fit(targets.reshape(-1, 1), predictions.flatten())
             y_pred = lr.predict(np.array([[min_val], [max_val]]))
-            r2_score = lr.score(targets.reshape(-1, 1), predictions.flatten())
-            
             fig.add_trace(go.Scatter(x=[min_val, max_val],
                                     y=y_pred.flatten(),
                                     mode='lines',
-                                    name=f'拟合线 (R²={r2_score:.3f})',
+                                    name='拟合线',
                                     line=dict(color='red', width=2)))
             
             # 更新布局
@@ -448,10 +445,9 @@ class PerformanceVisualizer:
             lr = LinearRegression()
             lr.fit(targets.reshape(-1, 1), predictions)
             y_pred = lr.predict(targets.reshape(-1, 1))
-            r2_score = lr.score(targets.reshape(-1, 1), predictions)
             
             ax.plot(targets, y_pred, 'r-', linewidth=2, 
-                   label=f'拟合线 (R²={r2_score:.3f})', alpha=0.7)
+                   label='拟合线', alpha=0.7)
             
             # 设置标签和标题
             ax.set_xlabel('真实值 (kW)', fontsize=11)
@@ -478,7 +474,7 @@ class PerformanceVisualizer:
         """
         # 准备数据
         horizons = list(results.keys())
-        metrics_names = ['RMSE', 'MAE', 'NRMSE', 'R²', 'MAPE']
+        metrics_names = ['RMSE', 'MAE', 'NRMSE']
         
         fig = go.Figure()
         
@@ -494,13 +490,8 @@ class PerformanceVisualizer:
             values = []
             for metric in metrics_names:
                 if metric in metrics_dict:
-                    if metric == 'R²':
-                        values.append(metrics_dict[metric])
-                    elif metric == 'MAPE':
-                        values.append(max(0, 1 - metrics_dict[metric]/100))
-                    else:
-                        # 对于误差指标，值越小越好
-                        values.append(1 / (1 + metrics_dict[metric]))
+                    # 对于误差指标，值越小越好
+                    values.append(1 / (1 + metrics_dict[metric]))
                 else:
                     values.append(0)
             
@@ -514,7 +505,7 @@ class PerformanceVisualizer:
                 fill='toself',
                 fillcolor=colors[i % len(colors)],
                 opacity=0.3,
-                name=f'{horizon*10}分钟预测',
+                name=f'{horizon}步预测',
                 line=dict(color=colors[i % len(colors)], width=2)
             ))
         
@@ -569,7 +560,7 @@ class PerformanceVisualizer:
         # 将误差指标转换为性能分数（越小越好的指标反转）
         display_data = heatmap_data.copy()
         for col in display_data.columns:
-            if col in ['RMSE', 'MAE', 'NRMSE', 'MAPE']:
+            if col in ['RMSE', 'MAE', 'NRMSE']:
                 # 误差指标归一化并反转
                 display_data[col] = 1 / (1 + display_data[col])
         
@@ -602,7 +593,7 @@ class PerformanceVisualizer:
                                      metrics: Optional[List[str]] = None,
                                      title: str = "分天气性能对比",
                                      save_path: Optional[str] = None) -> plt.Figure:
-        metrics = metrics or ['RMSE', 'MAE', 'MAPE']
+        metrics = metrics or ['RMSE', 'MAE']
         weather_types = list(per_weather.keys())
         x = np.arange(len(weather_types))
         bar_width = 0.8 / max(len(metrics), 1)
@@ -639,8 +630,8 @@ class PerformanceVisualizer:
         metrics_dict = metrics_dict or {}
         rmse_val = float(metrics_dict.get('RMSE', np.sqrt(np.mean(errors ** 2))))
         mae_val = float(metrics_dict.get('MAE', np.mean(np.abs(errors))))
-        total_var = np.sum((targets - np.mean(targets)) ** 2)
-        r2_val = float(metrics_dict.get('R²', 1.0 - np.sum(errors ** 2) / total_var)) if total_var > 0 else 0.0
+        range_den = float(np.max(targets) - np.min(targets)) if len(targets) > 0 else 0.0
+        nrmse_val = float(metrics_dict.get('NRMSE', rmse_val / max(range_den, 1e-8)))
 
         fig = make_subplots(
             rows=3,
@@ -648,7 +639,7 @@ class PerformanceVisualizer:
             subplot_titles=(
                 '功率对比', '误差趋势', 'RMSE',
                 '散点回归', '误差分布', 'MAE',
-                '多时间尺度', '天气占比', 'R²'
+                '多时间尺度', '天气占比', 'NRMSE'
             ),
             specs=[
                 [{'type': 'scatter'}, {'type': 'scatter'}, {'type': 'indicator'}],
@@ -687,12 +678,12 @@ class PerformanceVisualizer:
                       row=2, col=3)
 
         if multi_horizon:
-            horizon_labels = [f"{h * 10}min" for h in multi_horizon.keys()]
-            r2_scores = [multi_horizon[h].get('R²', 0) for h in multi_horizon.keys()]
-            fig.add_trace(go.Bar(x=horizon_labels, y=r2_scores, marker_color=self.colors['success'], name='R²'),
+            horizon_labels = [f"{h}步" for h in multi_horizon.keys()]
+            rmse_scores = [multi_horizon[h].get('RMSE', 0) for h in multi_horizon.keys()]
+            fig.add_trace(go.Bar(x=horizon_labels, y=rmse_scores, marker_color=self.colors['success'], name='RMSE'),
                           row=3, col=1)
         else:
-            fig.add_trace(go.Bar(x=['N/A'], y=[0], marker_color=self.colors['success'], name='R²'), row=3, col=1)
+            fig.add_trace(go.Bar(x=['N/A'], y=[0], marker_color=self.colors['success'], name='RMSE'), row=3, col=1)
 
         if weather_distribution:
             fig.add_trace(go.Pie(labels=list(weather_distribution.keys()),
@@ -702,9 +693,9 @@ class PerformanceVisualizer:
         else:
             fig.add_trace(go.Pie(labels=['N/A'], values=[1]), row=3, col=2)
 
-        fig.add_trace(go.Indicator(mode="gauge+number", value=max(0.0, min(1.0, r2_val)),
-                                   title={'text': "R²"},
-                                   gauge={'axis': {'range': [0, 1]},
+        fig.add_trace(go.Indicator(mode="gauge+number", value=max(0.0, nrmse_val),
+                                   title={'text': "NRMSE"},
+                                   gauge={'axis': {'range': [0, max(1.0, nrmse_val * 1.5)]},
                                           'bar': {'color': "darkred"}}),
                       row=3, col=3)
 
@@ -889,11 +880,17 @@ class ModelEvaluator:
             'targets': all_targets
         }
     
+
+
+    
+    
+        
+    
     def generate_report(self,
                        results,
                        output_path: str = './experiments/results/report.html'):
         """
-        生成HTML格式的评估报告
+        生成HTML格式的评估报告（仅保留 RMSE/MAE/NRMSE）
         """
         html_template = """
         <!DOCTYPE html>
@@ -901,25 +898,23 @@ class ModelEvaluator:
         <head>
             <title>DLFE-LSTM-WSI 评估报告</title>
             <style>
-                body {{ font-family: Arial, sans-serif; margin: 20px; }}
-                h1 {{ color: #2E86AB; }}
-                table {{ border-collapse: collapse; width: 100%; }}
-                th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-                th {{ background-color: #f2f2f2; }}
-                .metric-good {{ color: green; font-weight: bold; }}
-                .metric-bad {{ color: red; font-weight: bold; }}
+                body { font-family: Arial, sans-serif; margin: 20px; }
+                h1 { color: #2E86AB; }
+                table { border-collapse: collapse; width: 100%; }
+                th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+                th { background-color: #f2f2f2; }
+                .metric-good { color: green; font-weight: bold; }
+                .metric-bad { color: red; font-weight: bold; }
             </style>
         </head>
         <body>
             <h1>DLFE-LSTM-WSI 模型评估报告</h1>
             <h2>性能指标汇总</h2>
             <table>
-                <tr><th>指标</th><th>值</th><th>评价</th></tr>
+                <tr><th>指标</th><th>数值</th><th>评价</th></tr>
                 <tr><td>RMSE</td><td>{rmse:.4f}</td><td class="{rmse_class}">{rmse_eval}</td></tr>
                 <tr><td>MAE</td><td>{mae:.4f}</td><td class="{mae_class}">{mae_eval}</td></tr>
                 <tr><td>NRMSE</td><td>{nrmse:.4f}</td><td class="{nrmse_class}">{nrmse_eval}</td></tr>
-                <tr><td>R²</td><td>{r2:.4f}</td><td class="{r2_class}">{r2_eval}</td></tr>
-                <tr><td>MAPE</td><td>{mape:.2f}%</td><td class="{mape_class}">{mape_eval}</td></tr>
             </table>
             <h2>结论</h2>
             <p>{conclusion}</p>
@@ -927,51 +922,32 @@ class ModelEvaluator:
         </body>
         </html>
         """
-        
-        # 评价标准
-        def evaluate_metric(metric, value, thresholds):
-            if metric in ['RMSE', 'MAE', 'NRMSE', 'MAPE']:
-                # 误差指标，越小越好
-                if value < thresholds[0]:
-                    return 'metric-good', '优秀'
-                elif value < thresholds[1]:
-                    return 'metric-normal', '良好'
-                else:
-                    return 'metric-bad', '需改进'
-            else:  # R²
-                # R²越大越好
-                if value > thresholds[1]:
-                    return 'metric-good', '优秀'
-                elif value > thresholds[0]:
-                    return 'metric-normal', '良好'
-                else:
-                    return 'metric-bad', '需改进'
-        
-        # 设置阈值
+
+        def evaluate_metric(value, thresholds):
+            if value < thresholds[0]:
+                return 'metric-good', '优秀'
+            elif value < thresholds[1]:
+                return 'metric-normal', '良好'
+            else:
+                return 'metric-bad', '需改进'
+
         thresholds = {
             'RMSE': [20, 30],
             'MAE': [15, 25],
             'NRMSE': [0.1, 0.2],
-            'R2': [0.8, 0.9],
-            'MAPE': [10, 20]
         }
-        
-        # 评价各指标
-        rmse_class, rmse_eval = evaluate_metric('RMSE', results.rmse, thresholds['RMSE'])
-        mae_class, mae_eval = evaluate_metric('MAE', results.mae, thresholds['MAE'])
-        nrmse_class, nrmse_eval = evaluate_metric('NRMSE', results.nrmse, thresholds['NRMSE'])
-        r2_class, r2_eval = evaluate_metric('R2', results.r2, thresholds['R2'])
-        mape_class, mape_eval = evaluate_metric('MAPE', results.mape, thresholds['MAPE'])
-        
-        # 生成结论
-        if results.r2 > 0.9 and results.mape < 10:
+
+        rmse_class, rmse_eval = evaluate_metric(results.rmse, thresholds['RMSE'])
+        mae_class, mae_eval = evaluate_metric(results.mae, thresholds['MAE'])
+        nrmse_class, nrmse_eval = evaluate_metric(results.nrmse, thresholds['NRMSE'])
+
+        if results.rmse < thresholds['RMSE'][0] and results.mae < thresholds['MAE'][0]:
             conclusion = "模型表现优秀，预测精度高，可以投入实际应用。"
-        elif results.r2 > 0.8 and results.mape < 20:
+        elif results.rmse < thresholds['RMSE'][1] and results.mae < thresholds['MAE'][1]:
             conclusion = "模型表现良好，预测精度满足要求，建议进一步优化。"
         else:
             conclusion = "模型需要改进，建议调整超参数或增加训练数据。"
-        
-        # 填充模板
+
         html_content = html_template.format(
             rmse=results.rmse,
             rmse_class=rmse_class,
@@ -982,20 +958,13 @@ class ModelEvaluator:
             nrmse=results.nrmse,
             nrmse_class=nrmse_class,
             nrmse_eval=nrmse_eval,
-            r2=results.r2,
-            r2_class=r2_class,
-            r2_eval=r2_eval,
-            mape=results.mape,
-            mape_class=mape_class,
-            mape_eval=mape_eval,
             conclusion=conclusion,
             timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         )
-        
-        # 保存报告
+
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(html_content)
-        
+
         print(f"评估报告已生成: {output_path}")
 
 
@@ -1010,9 +979,9 @@ def generate_markdown_report(output_path: Union[str, Path],
     header_lines.append("# DLFE-LSTM-WSI 评估摘要")
     header_lines.append("")
     header_lines.append("## 整体指标")
-    overall_dict = overall.to_dict() if hasattr(overall, 'to_dict') else overall
+    overall_dict = overall.to_dict() if hasattr(overall, "to_dict") else overall
     for name, value in overall_dict.items():
-        if name == 'CI_95%':
+        if name == "CI_95%":
             header_lines.append(f"- {name}: {value[0]:.4f} ~ {value[1]:.4f}")
         else:
             header_lines.append(f"- {name}: {value:.4f}")
@@ -1021,9 +990,9 @@ def generate_markdown_report(output_path: Union[str, Path],
     if per_weather:
         body_lines.append("## 分天气表现")
         for weather, metrics in per_weather.items():
-            metrics_dict = metrics.to_dict() if hasattr(metrics, 'to_dict') else metrics
-            metrics_text = ', '.join(
-                f"{key}={metrics_dict[key]:.4f}" if key != 'CI_95%'
+            metrics_dict = metrics.to_dict() if hasattr(metrics, "to_dict") else metrics
+            metrics_text = ", ".join(
+                f"{key}={metrics_dict[key]:.4f}" if key != "CI_95%"
                 else f"{key}={metrics_dict[key][0]:.4f}~{metrics_dict[key][1]:.4f}"
                 for key in metrics_dict
             )
@@ -1033,13 +1002,13 @@ def generate_markdown_report(output_path: Union[str, Path],
     if multi_horizon:
         body_lines.append("## 多时间尺度结果")
         for horizon, metrics in multi_horizon.items():
-            metrics_dict = metrics.to_dict() if hasattr(metrics, 'to_dict') else metrics
-            metrics_text = ', '.join(
-                f"{key}={metrics_dict[key]:.4f}" if key != 'CI_95%'
+            metrics_dict = metrics.to_dict() if hasattr(metrics, "to_dict") else metrics
+            metrics_text = ", ".join(
+                f"{key}={metrics_dict[key]:.4f}" if key != "CI_95%"
                 else f"{key}={metrics_dict[key][0]:.4f}~{metrics_dict[key][1]:.4f}"
                 for key in metrics_dict
             )
-            body_lines.append(f"- {horizon*10}分钟: {metrics_text}")
+            body_lines.append(f"- {horizon}步: {metrics_text}")
         body_lines.append("")
 
     if significance:
@@ -1059,64 +1028,5 @@ def generate_markdown_report(output_path: Union[str, Path],
         body_lines.append("")
 
     content_lines = header_lines + body_lines
-    Path(output_path).write_text('\n'.join(content_lines), encoding='utf-8')
+    Path(output_path).write_text("\n".join(content_lines), encoding="utf-8")
 
-
-# 单元测试
-if __name__ == "__main__":
-    print("="*50)
-    print("评估模块单元测试")
-    print("="*50)
-    
-    # 生成测试数据
-    np.random.seed(42)
-    n_samples = 500
-    
-    # 模拟一天的光伏功率数据（5分钟间隔，288个点）
-    time = np.linspace(0, 24, n_samples)
-    
-    # 生成真实功率曲线（钟形曲线模拟日照）
-    true_power = 600 * np.exp(-((time - 12)**2) / 18) + np.random.randn(n_samples) * 10
-    true_power = np.maximum(true_power, 0)  # 功率非负
-    
-    # 生成预测值（添加系统性偏差和噪声）
-    pred_power = true_power * 0.95 + np.random.randn(n_samples) * 30
-    pred_power = np.maximum(pred_power, 0)
-    
-    # 测试可视化器
-    visualizer = PerformanceVisualizer()
-    
-    # 1. 测试预测对比图
-    print("\n1. 生成预测对比图...")
-    fig1 = visualizer.plot_prediction_comparison(pred_power, true_power)
-    plt.show()
-    
-    # 2. 测试误差分布图
-    print("\n2. 生成误差分布图...")
-    errors = pred_power - true_power
-    fig2 = visualizer.plot_error_distribution(errors)
-    plt.show()
-    
-    # 3. 测试散点回归图
-    print("\n3. 生成散点回归图...")
-    fig3 = visualizer.plot_scatter_regression(pred_power, true_power, interactive=False)
-    plt.show()
-    
-    # 4. 测试综合评估器
-    print("\n4. 测试综合评估器...")
-    evaluator = ModelEvaluator()
-    
-    # 转换为张量
-    pred_tensor = torch.from_numpy(pred_power).float()
-    true_tensor = torch.from_numpy(true_power).float()
-    
-    # 计算指标
-    metrics = evaluator.metrics.calculate_all_metrics(pred_tensor, true_tensor)
-    print(f"\n评估结果:")
-    for key, value in metrics.to_dict().items():
-        if key == 'CI_95%':
-            print(f"  {key}: [{value[0]:.2f}, {value[1]:.2f}]")
-        else:
-            print(f"  {key}: {value:.4f}")
-    
-    print("\n测试完成!")

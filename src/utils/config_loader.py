@@ -396,8 +396,8 @@ class ConfigLoader:
                 }
             },
             'evaluation': {
-                'metrics': ['RMSE', 'MAE', 'NRMSE', 'R2', 'MAPE'],
-                'horizons': [1, 3, 6],
+                'metrics': ['RMSE', 'MAE', 'NRMSE'],
+                'horizons': [1, 2, 4],
                 'confidence_level': 0.95
             }
         }

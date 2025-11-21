@@ -1,0 +1,42 @@
+thresholds:
+  ci:
+    clear_partly: 0.25725613838882455
+    clear_partly_band:
+      lower: null
+      upper: null
+    partly_over: 0.29788587281805534
+    partly_over_band:
+      lower: null
+      upper: null
+    method: gaussian
+    gray_width: 0.02
+  wsi:
+    clear_partly: 0.7529699775661542
+    clear_partly_band:
+      lower: 0.7507235524265631
+      upper: 0.7558857527557739
+    partly_over: 0.752093619802285
+    partly_over_band:
+      lower: 0.7504209154201423
+      upper: 0.7533952425415604
+    method: gaussian
+    gray_width: 0.02
+diagnostics:
+  silhouette: 0.20010749407954553
+  agreement: 0.39504673282002717
+  ci_overlap: 0.7347436798377494
+  wsi_overlap: 0.35614602413122215
+  overlap_mode: raw
+  gray_ratio: 0.18001399925886277
+  gmm_agreement: 0.38724420471857374
+  class_counts:
+    sunny: 6023
+    cloudy: 815
+    overcast: 17449
+  class_ratios:
+    sunny: 0.24799275332482398
+    cloudy: 0.03355704697986577
+    overcast: 0.7184501996953102
+  min_class_ratio: 0.03355704697986577
+  min_class_ratio_threshold: 0.05
+status: fallback

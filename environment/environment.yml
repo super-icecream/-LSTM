@@ -86,7 +86,7 @@ dependencies:
 # 
 # 安装命令：
 #   conda env create -f environment.yml
-#   conda activate dlfe-lstm-wsi
+#   conda activate "C:\Users\Administrator\桌面\专利\DLFE-LSTM-WSI\.conda"
 # 
 # 更新环境：
 #   conda env update -f environment.yml --prune

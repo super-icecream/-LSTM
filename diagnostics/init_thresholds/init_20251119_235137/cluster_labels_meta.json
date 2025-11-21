@@ -1,0 +1,15 @@
+{
+  "split": "train",
+  "start_date": null,
+  "end_date": null,
+  "daytime_mode": "ghi",
+  "daytime_ge_min": 20.0,
+  "daytime_ghi_min": 5.0,
+  "window_mins": 60,
+  "min_samples_per_window": 3,
+  "scaler": "robust",
+  "use_pca": false,
+  "pca_n": 3,
+  "feature_count": 9,
+  "sample_count": 24290
+}

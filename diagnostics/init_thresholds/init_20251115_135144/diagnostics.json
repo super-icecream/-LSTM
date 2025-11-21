@@ -1,0 +1,62 @@
+{
+  "cluster_info": {
+    "cluster_to_weather": {
+      "0": 0,
+      "1": 1,
+      "2": 2
+    },
+    "counts": {
+      "sunny": 24194,
+      "cloudy": 5,
+      "overcast": 5
+    },
+    "silhouette": 0.9969385732627702
+  },
+  "ci": {
+    "low_boundary": {
+      "value": 0.056885540709028785,
+      "method": "quantile",
+      "band_p10": null,
+      "band_p90": null
+    },
+    "high_boundary": {
+      "value": 0.0,
+      "method": "quantile",
+      "band_p10": null,
+      "band_p90": null
+    }
+  },
+  "wsi": {
+    "low_boundary": {
+      "value": 0.5060000000000011,
+      "method": "quantile",
+      "band_p10": null,
+      "band_p90": null
+    },
+    "high_boundary": {
+      "value": 0.5380100000000001,
+      "method": "quantile",
+      "band_p10": null,
+      "band_p90": null
+    }
+  },
+  "gmm": {
+    "covariance_type": "full",
+    "bic": {
+      "full": 1281733.3082857258,
+      "diag": 1446072.6186502792
+    },
+    "converged": true,
+    "weights": [
+      1.0,
+      9.17388055383537e-20,
+      9.17388055383537e-20
+    ],
+    "means_shape": [
+      3,
+      17
+    ],
+    "agreement_with_kmeans": 0.9995868451495621
+  },
+  "notes": "Use thresholds.ci.* and thresholds.wsi.* to populate feature_engineering in config.yaml."
+}

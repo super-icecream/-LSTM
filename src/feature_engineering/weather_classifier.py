@@ -37,10 +37,14 @@ class WeatherClassifier:
                  location_lat: float = 38.5,  # 甘肃纬度
                  location_lon: float = 105.0,  # 甘肃经度
                  elevation: float = 1500,  # 海拔高度(米)
+                 time_zone_hours: Optional[float] = None,  # 时区（小时，例：CST=8），若 None 则回退自动推断
                  ci_thresholds: List[float] = [0.2, 0.6],
                  wsi_thresholds: List[float] = [0.3, 0.7],
                  fusion_weights: Dict[str, float] = {'ci': 0.7, 'wsi': 0.3},
+                 # 日间掩码参数：模式 + 阈值
                  daytime_ge_min: float = 20.0,
+                 daytime_mode: str = "ge",         # ge | ghi | or | and
+                 daytime_ghi_min: float = 5.0,     # 仅在模式包含 ghi 时使用
                  night_handling: str = "exclude"):
         """
         初始化天气分类器
@@ -56,6 +60,8 @@ class WeatherClassifier:
         self.location_lat = location_lat
         self.location_lon = location_lon
         self.elevation = elevation
+        # 明确记录时区（小时）；若为 None 则在计算时尝试从时间戳 tzinfo 推断，最后再回退经度/15
+        self.time_zone_hours: Optional[float] = float(time_zone_hours) if time_zone_hours is not None else None
 
         # 转换为弧度
         self.lat_rad = np.radians(location_lat)
@@ -74,6 +80,10 @@ class WeatherClassifier:
 
         # 白天判定阈值与夜间处理策略
         self.daytime_ge_min = float(daytime_ge_min)
+        self.daytime_mode = str(daytime_mode).lower().strip()
+        if self.daytime_mode not in {"ge", "ghi", "or", "and"}:
+            raise ValueError(f"daytime_mode 仅支持 ge/ghi/or/and，收到: {daytime_mode}")
+        self.daytime_ghi_min = float(daytime_ghi_min)
         night_handling = night_handling.lower()
         if night_handling not in {"exclude", "assign-cloudy"}:
             raise ValueError(f"night_handling 仅支持 'exclude' 或 'assign-cloudy'，收到: {night_handling}")
@@ -93,7 +103,13 @@ class WeatherClassifier:
         }
 
         logger.info(f"天气分类器初始化: 位置({location_lat:.2f}°N, {location_lon:.2f}°E), "
-                   f"海拔{elevation}m")
+                   f"海拔{elevation}m"
+                   f"{', 时区UTC%+g' % self.time_zone_hours if self.time_zone_hours is not None else ''}"
+                   f"，日间掩码: {self.daytime_mode.upper()}"
+                   f"{'(GE≥%.2f W/m²' % self.daytime_ge_min if self.daytime_mode in {'ge','or','and'} else ''}"
+                   f"{' OR ' if self.daytime_mode=='or' else (' AND ' if self.daytime_mode=='and' else '')}"
+                   f"{'GHI≥%.2f W/m²' % self.daytime_ghi_min if self.daytime_mode in {'ghi','or','and'} else ''}"
+                   f"{')' if self.daytime_mode in {'ge','or','and'} else ''}")
 
     def calculate_ci(self, ghi: Union[float, np.ndarray],
                     timestamp: Union[datetime, pd.DatetimeIndex]) -> Tuple[Union[float, np.ndarray], Union[bool, np.ndarray]]:
@@ -116,8 +132,19 @@ class WeatherClassifier:
         ghi_arr = np.asarray(ghi, dtype=float)
         ge_arr = np.asarray(ge, dtype=float)
 
-        # 白天判定：GE 超过阈值视为白天
-        day_mask = ge_arr >= self.daytime_ge_min
+        # 白天判定
+        # - ge: GE ≥ ge_min
+        # - ghi: GHI ≥ ghi_min
+        # - or: (GE ≥ ge_min) OR (GHI ≥ ghi_min)
+        # - and: (GE ≥ ge_min) AND (GHI ≥ ghi_min)
+        if self.daytime_mode == "ge":
+            day_mask = ge_arr >= self.daytime_ge_min
+        elif self.daytime_mode == "ghi":
+            day_mask = ghi_arr >= self.daytime_ghi_min
+        elif self.daytime_mode == "or":
+            day_mask = (ge_arr >= self.daytime_ge_min) | (ghi_arr >= self.daytime_ghi_min)
+        else:  # "and"
+            day_mask = (ge_arr >= self.daytime_ge_min) & (ghi_arr >= self.daytime_ghi_min)
 
         # 避免除零，仅对白天样本计算
         safe_ge = np.where(day_mask, ge_arr, 1.0)
@@ -192,11 +219,19 @@ class WeatherClassifier:
                                    0.3387 * np.cos(3 * gamma + 0.0607))
 
             # 计算真太阳时
+            # 注意：数据时间轴假定为“站点当地标准时”。优先使用时间戳自身 tzinfo；
+            # 否则使用 self.time_zone_hours；最后回退为 round(lon/15)。
             local_hour = ts.hour + ts.minute / 60 + ts.second / 3600
 
-            # 经度时差修正
-            time_zone = round(self.location_lon / 15)  # 时区
-            longitude_correction = 4 * (self.location_lon - time_zone * 15)  # 分钟
+            if hasattr(ts, "tzinfo") and ts.tzinfo is not None and ts.tzinfo.utcoffset(ts) is not None:
+                tz_hours = ts.tzinfo.utcoffset(ts).total_seconds() / 3600.0
+            elif self.time_zone_hours is not None:
+                tz_hours = float(self.time_zone_hours)
+            else:
+                tz_hours = float(round(self.location_lon / 15.0))
+
+            # 经度时差修正：相对于时区中央经线(15°×tz_hours)
+            longitude_correction = 4 * (self.location_lon - tz_hours * 15.0)  # 分钟
 
             # 真太阳时（小时）
             solar_time = local_hour + (equation_of_time + longitude_correction) / 60

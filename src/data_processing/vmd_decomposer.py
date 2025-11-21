@@ -11,6 +11,8 @@ import pandas as pd
 from typing import Tuple, List, Optional, Union, Dict, Iterator
 from pathlib import Path
 import logging
+import sys
+import time
 import json
 import pickle
 from scipy.signal import hilbert
@@ -38,7 +40,8 @@ class VMDDecomposer:
     """
 
     def __init__(self, n_modes: int = 5, alpha: float = 2000, tau: float = 0.1,
-                 DC: int = 0, init: int = 1, tol: float = 1e-6, max_iter: int = 500):
+                 DC: int = 0, init: int = 1, tol: float = 1e-6, max_iter: int = 500,
+                 verbose: bool = False):
         """
         初始化VMD分解器
 
@@ -58,6 +61,7 @@ class VMDDecomposer:
         self.init = init
         self.tol = tol
         self.max_iter = max_iter
+        self.verbose = bool(verbose)
 
         # 存储分解参数
         self.decompose_params = {
@@ -96,6 +100,13 @@ class VMDDecomposer:
         """
         # 验证输入
         signal = np.asarray(signal).flatten()
+        # Silence verbose INFO logs for non-verbose runs to prevent console spamming
+        _prev_level = logger.level
+        if not self.verbose and _prev_level <= logging.INFO:
+            try:
+                logger.setLevel(logging.WARNING)
+            except Exception:
+                pass
         if signal.ndim != 1:
             raise ValueError(f"输入信号必须是一维数组，当前维度: {signal.ndim}")
 
@@ -139,9 +150,12 @@ class VMDDecomposer:
             omega[0, 0] = 0
 
         # 开始ADMM优化迭代
-        logger.info("开始ADMM迭代优化...")
+        # 单行进度条（仅在 verbose 下启用）
+        if self.verbose:
+            logger.info("开始ADMM迭代优化...")
         n_iter = 0
         u_hat_plus_prev = u_hat_plus.copy()
+        last_update = 0.0
 
         for n in range(self.max_iter - 1):
             # 更新模态u
@@ -202,7 +216,21 @@ class VMDDecomposer:
             norm = np.sum(np.abs(u_hat_plus_prev) ** 2)
             conv_check = diff / (norm + 1e-10)
 
+            # 单行进度条刷新（节流）
+            now = time.time()
+            if self.verbose and (now - last_update > 0.05 or n + 1 == self.max_iter - 1):
+                prog = (n + 1) / (self.max_iter - 1) if self.max_iter > 1 else 1.0
+                bar_len = 30
+                filled = min(bar_len, int(bar_len * prog))
+                bar = "#" * filled + "-" * (bar_len - filled)
+                sys.stdout.write(f"\r  VMD [{bar}] {prog*100:5.1f}% | 迭代:{n+1}/{self.max_iter} | 误差:{conv_check:.2e}")
+                sys.stdout.flush()
+                last_update = now
+
             if conv_check < self.tol:
+                if self.verbose:
+                    sys.stdout.write(f"\r  VMD [{'#'*30}] {100:5.1f}% | 迭代:{n+1}/{self.max_iter} | 误差:{conv_check:.2e}\n")
+                    sys.stdout.flush()
                 logger.info(f"VMD收敛于第{n + 1}次迭代，误差: {conv_check:.2e}")
                 n_iter = n + 1
                 break
@@ -271,21 +299,22 @@ class VMDDecomposer:
         else:
             energy_ratio = np.zeros_like(energy)
 
-        logger.info("=" * 60)
-        logger.info("VMD分解质量诊断")
-        logger.info("=" * 60)
-        logger.info(f"重构误差: {reconstruction_error:.2e}")
-        logger.info(f"模态正交性 - 平均相关系数: {avg_correlation:.3f}, 最大相关系数: {max_correlation:.3f}")
-        logger.info(f"频率分离度 - 最小间隔: {min_freq_gap:.4f}, 平均间隔: {avg_freq_gap:.4f}")
-        logger.info(f"频率分布: {sorted_omega}")
-        logger.info("能量分布:")
-        for idx, ratio in enumerate(energy_ratio):
-            logger.info(f"  IMF{idx + 1}: {ratio:.4f} ({ratio * 100:.2f}%)")
-        logger.info("=" * 60)
+        # 简洁诊断（单行摘要，避免刷屏）
+        if self.verbose:
+            summary_energy = ", ".join([f"IMF{i+1}:{r*100:.1f}%" for i, r in enumerate(energy_ratio)])
+            logger.info(
+                "VMD诊断 | 重构误差=%.2e | 正交性(均/最)=%.3f/%.3f | 频率间隔(最/均)=%.4f/%.4f | 能量占比=[%s]",
+                reconstruction_error, avg_correlation, max_correlation, min_freq_gap, avg_freq_gap, summary_energy
+            )
         # ============================================================
 
         logger.info(f"VMD分解完成，各模态中心频率: {omega_final}")
 
+        # Restore logger level
+        try:
+            logger.setLevel(_prev_level)
+        except Exception:
+            pass
         return u, omega_final
 
     def reconstruct_features(self, imfs: np.ndarray,
@@ -342,8 +371,9 @@ class VMDDecomposer:
         # 组合特征
         combined_features = pd.concat([imf_df, other_features[available_columns]], axis=1)
 
-        logger.info(f"特征重组完成，最终特征维度: {combined_features.shape}")
-        logger.info(f"特征列: {list(combined_features.columns)}")
+        if self.verbose:
+            logger.info(f"特征重组完成，最终特征维度: {combined_features.shape}")
+            logger.info(f"特征列: {list(combined_features.columns)}")
 
         return combined_features
 
@@ -351,39 +381,36 @@ class VMDDecomposer:
                        power_column: str = 'power',
                        day_mask: Optional[Union[np.ndarray, List[bool]]] = None) -> pd.DataFrame:
         """
-        ?????????????
-
-        ????????????????????VMD???????????????????
+        对数据集执行功率VMD分解并与其他特征合并。
 
         Args:
-            data: ???????????????????????????????????
-            power_column: ??????????
-            day_mask: ????????????True ????????VMD
+            data: 输入DataFrame，包含功率及其他特征
+            power_column: 功率列名
+            day_mask: 可选，True 表示白天片段，仅对白天做 VMD
 
         Returns:
-            pd.DataFrame: ????????????????
+            pd.DataFrame: [IMF..., 其他特征] 的组合特征表
         """
         if power_column not in data.columns:
-            # ?????????????????
+            # 尝试常见的功率列名
             possible_names = ['P', 'Power', 'power', 'pv_power']
             for name in possible_names:
                 if name in data.columns:
                     power_column = name
                     break
             else:
-                raise ValueError(f"?????????????????: {possible_names}")
+                raise ValueError(f"未找到功率列，可选列名: {possible_names}")
 
-        logger.info(f"?????????????????: {power_column}")
+        logger.info(f"使用的功率列: {power_column}")
 
-        # ???????????
+        # 取出功率序列
         power_signal = data[power_column].values
         day_mask_array: Optional[np.ndarray] = None
         if day_mask is not None:
             day_mask_array = np.asarray(day_mask, dtype=bool).reshape(-1)
             if day_mask_array.shape[0] != power_signal.shape[0]:
                 raise ValueError(
-                    f"day_mask ????({day_mask_array.shape[0]}) ?? "
-                    f"??????????({power_signal.shape[0]}) ?????"
+                    f"day_mask 长度({day_mask_array.shape[0]}) 与功率长度({power_signal.shape[0]}) 不一致"
                 )
 
         if day_mask_array is not None:
@@ -394,14 +421,14 @@ class VMDDecomposer:
                 power_column=power_column,
             )
 
-        # ???VMD???
+        # 全段执行 VMD
         imfs, omega = self.decompose(power_signal)
 
-        # ???????????
+        # 取出其它特征列
         other_columns = [col for col in data.columns if col != power_column]
         other_features = data[other_columns]
 
-        # ????????
+        # 拼接 IMF 与其它特征
         processed_features = self.reconstruct_features(imfs, other_features)
 
         return processed_features
@@ -414,30 +441,51 @@ class VMDDecomposer:
         power_column: str,
     ) -> pd.DataFrame:
         """
-        ??? day mask ????????????? VMD???????????0
+        对 day mask 切分的每个白天连续片段做 VMD，并在片段层面显示单行进度条
         """
         imfs_full = np.zeros((self.n_modes, len(signal)), dtype=np.float32)
         processed_segments = 0
-        for start, end in self._iter_day_segments(day_mask):
+        # 收集所有片段，便于计算总数并做单行进度条
+        segments = list(self._iter_day_segments(day_mask))
+        total_seg = len(segments)
+        last_print = 0.0
+        for idx_seg, (start, end) in enumerate(segments, 1):
             segment = signal[start:end]
             if len(segment) < max(self.n_modes * 2, 8):
-                logger.debug(
-                    "VMD segment[%d:%d] ??? %d < %d??????",
-                    start,
-                    end,
-                    len(segment),
-                    max(self.n_modes * 2, 8),
-                )
+                # 片段过短，跳过并更新进度条
+                prog = idx_seg / max(total_seg, 1)
+                bar_len = 30
+                filled = min(bar_len, int(bar_len * prog))
+                bar = "#" * filled + "-" * (bar_len - filled)
+                sys.stdout.write(f"\r  VMD(日间段) [{bar}] {prog*100:5.1f}% | 片段:{idx_seg}/{total_seg} | 跳过(片段过短)")
+                sys.stdout.flush()
                 continue
 
+            # 禁止片段内刷进度：只有在构造函数 verbose=True 时才会刷
+            verbose_backup = self.verbose
+            self.verbose = False
             imfs_seg, _ = self.decompose(segment)
+            self.verbose = verbose_backup
+
             seg_len = min(imfs_seg.shape[1], end - start)
             imfs_full[:, start:start + seg_len] = imfs_seg[:, :seg_len]
             processed_segments += 1
 
+            # 更新片段级进度条
+            prog = idx_seg / max(total_seg, 1)
+            bar_len = 30
+            filled = min(bar_len, int(bar_len * prog))
+            bar = "#" * filled + "-" * (bar_len - filled)
+            sys.stdout.write(f"\r  VMD(日间段) [{bar}] {prog*100:5.1f}% | 片段:{idx_seg}/{total_seg}")
+            sys.stdout.flush()
+
+        if total_seg > 0:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
         if not processed_segments:
             logger.warning(
-                "day mask ???????????????????VMD????0"
+                "day mask 分段后无可用片段，VMD处理片段数为0"
             )
 
         other_features = data.drop(columns=[power_column])
@@ -446,7 +494,7 @@ class VMDDecomposer:
     @staticmethod
     def _iter_day_segments(day_mask: np.ndarray) -> Iterator[Tuple[int, int]]:
         """
-        ???? day mask ????? [start, end) ???
+        遍历 day mask 中的连续白天片段 [start, end)
         """
         start_idx: Optional[int] = None
         for idx, is_day in enumerate(day_mask):

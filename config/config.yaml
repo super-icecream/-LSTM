@@ -1,4 +1,4 @@
-# DLFE-LSTM-WSI 主配置文件
+﻿# DLFE-LSTM-WSI 涓婚厤缃枃浠?
 project:
   name: "DLFE-LSTM-WSI"
   version: "1.0.0"
@@ -9,8 +9,8 @@ project:
   results_dir: ./experiments/results
 
 data:
-  dataset: "甘肃光伏功率预测数据集"
-  raw_dir: "./datas/2. 甘肃光伏功率预测数据集/data_original/solar_stations"
+  dataset: "鐢樿們鍏変紡鍔熺巼棰勬祴鏁版嵁闆?
+  raw_dir: "./datas/2. 鐢樿們鍏変紡鍔熺巼棰勬祴鏁版嵁闆?data_original/solar_stations"
   merge_method: "single"
   train_ratio: 0.7
   val_ratio: 0.2
@@ -63,12 +63,31 @@ preprocessing:
     max_iterations: 500
 
 feature_engineering:
-  ci_thresholds: [0.2, 0.6]
-  wsi_thresholds: [0.3, 0.7]
+  ci_thresholds: [0.34075845181405107, 0.4009113122074764]
+  wsi_thresholds: [0.7541151075794098, 0.7554378813685727]
   fusion_weights:
     ci: 0.7
     wsi: 0.3
+  reuse_cluster_labels:
+    enabled: true
+    fallback: classify    # classify | drop (褰撳墠浠呮敮鎸?classify)
+    min_coverage: 0.95    # 鏃ラ棿瑕嗙洊鐜囦綆浜庤闃堝€兼椂鍙戝嚭璀﹀憡
+    splits:
+      train:
+        labels_path: diagnostics/init_thresholds/init_20251119_235137/cluster_labels.npy
+        timestamps_path: diagnostics/init_thresholds/init_20251119_235137/cluster_timestamps.parquet
+        meta_path: diagnostics/init_thresholds/init_20251119_235137/cluster_labels_meta.json
+      val:
+        labels_path: diagnostics/init_thresholds/init_20251120_120224/cluster_labels.npy
+        timestamps_path: diagnostics/init_thresholds/init_20251120_120224/cluster_timestamps.parquet
+        meta_path: diagnostics/init_thresholds/init_20251120_120224/cluster_labels_meta.json
+      test:
+        labels_path: diagnostics/init_thresholds/init_20251120_120245/cluster_labels.npy
+        timestamps_path: diagnostics/init_thresholds/init_20251120_120245/cluster_timestamps.parquet
+        meta_path: diagnostics/init_thresholds/init_20251120_120245/cluster_labels_meta.json
   daytime:
+    # 鏃ラ棿鎺╃爜锛氬浐鍖栦负 GHI 娉曪紝闃堝€?5 W/m虏锛堝闇€鏀瑰洖 GE 鍙垏鎹?mode 骞惰皟鏁?ge_min_wm2锛?    mode: ghi
+    ghi_min_wm2: 5.0
     ge_min_wm2: 20.0
     night_handling: exclude
     apply_mask_in_vmd: true
@@ -89,10 +108,11 @@ feature_engineering:
     use_sparse_matrix: true
 
 model:
+  # Multi-output dims align with evaluation.horizons
+  output_dim: 3
   lstm:
     hidden_sizes: [100, 50]
     dropout_rates: [0.3, 0.2]
-    output_dim: 1
 
 training:
   batch_size: 64
@@ -116,8 +136,9 @@ adaptive:
 
 evaluation:
   device: auto
-  horizons: [1, 3, 6]
-  metrics: [RMSE, MAE, NRMSE, R2, MAPE]
+  # Multi-horizon forecasts: 15/30/60 minutes (15 min per step)
+  horizons: [1, 2, 4]
+  metrics: [RMSE, MAE, NRMSE]
   calculate_confidence: true
   confidence_level: 0.95
   n_bootstrap: 1000

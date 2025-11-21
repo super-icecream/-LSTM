@@ -1,9 +1,11 @@
-﻿"""
+"""
 WalkForwardTrainer
 ==================
 
-璐熻矗 orchestrate Walk-Forward 璁粌銆佽瘎浼颁笌鍦ㄧ嚎瀛︿範娴佺▼銆?
+Orchestrates walk-forward training, evaluation, and online learning.
 """
+
+
 
 from __future__ import annotations
 
@@ -13,8 +15,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
+import torch.cuda.amp as amp
 
 from ..data_processing.preprocessor import Preprocessor
 from ..data_processing.vmd_decomposer import VMDDecomposer
@@ -28,9 +32,26 @@ from ..evaluation import (
     export_metrics_bundle,
 )
 from .trainer import GPUOptimizedTrainer
+from ..utils.cluster_labels import (
+    ClusterLabelBundle,
+    load_cluster_label_bundle,
+    assign_cluster_labels,
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+def _json_fallback(obj: Any):
+    """Safe JSON fallback for custom metric objects."""
+    if hasattr(obj, "to_dict"):
+        try:
+            return obj.to_dict()
+        except Exception:
+            pass
+    if hasattr(obj, "__dict__"):
+        return obj.__dict__
+    return str(obj)
 
 
 def _align_length(arrays: List[np.ndarray]) -> List[np.ndarray]:
@@ -46,7 +67,7 @@ def _sanitize_array(array: np.ndarray) -> np.ndarray:
 
 
 class WalkForwardTrainer:
-    """Walk-Forward 划分执行训练 / 评估 / 在线学习的调度器"""
+    """Scheduler for walk-forward training / evaluation / online learning."""
 
     def __init__(
         self,
@@ -57,7 +78,9 @@ class WalkForwardTrainer:
         base_result_dir: Path,
         logger: logging.Logger,
         weather_map: Dict[int, str],
-        build_sequence_sets: Callable[[Dict[str, Dict[str, np.ndarray]], int, Any], Dict[str, Dict[str, np.ndarray]]],
+        build_sequence_sets: Callable[
+            [Dict[str, Dict[str, np.ndarray]], int, List[int], Any], Dict[str, Dict[str, np.ndarray]]
+        ],
         build_weather_dataloaders: Callable[..., Dict[str, Any]],
         evaluate_fn: Callable[..., Any],
         build_model_builder: Callable[[Dict, int, int], Any],
@@ -76,6 +99,7 @@ class WalkForwardTrainer:
         self.base_result_dir = base_result_dir
 
         self.seq_length = config.get("data", {}).get("sequence_length", 24)
+        self.horizons = list(config.get("evaluation", {}).get("horizons", [1, 2, 4]))
         training_cfg = dict(config.get("training", {}))
         if training_cfg.get("learning_rate") is None:
             training_cfg["learning_rate"] = 0.001
@@ -97,6 +121,122 @@ class WalkForwardTrainer:
         self.online_cfg = online_cfg
         self.weight_cfg = wf_cfg.get("weight_inheritance", {"enable": True, "strategy": "full"})
 
+        fe_cfg = config.get("feature_engineering", {})
+        reuse_cfg = fe_cfg.get("reuse_cluster_labels", {})
+        self.reuse_labels_enabled = bool(reuse_cfg.get("enabled", False))
+        self.reuse_label_bundles: Dict[str, ClusterLabelBundle] = {}
+        self.reuse_label_bundle_combined: Optional[ClusterLabelBundle] = None
+        self.reuse_label_fallback = str(reuse_cfg.get("fallback", "classify")).lower()
+        self.reuse_label_min_coverage = float(reuse_cfg.get("min_coverage", 0.95))
+        if self.reuse_labels_enabled:
+            split_cfgs = reuse_cfg.get("splits", {})
+            for split_name, cfg in split_cfgs.items():
+                self.reuse_label_bundles[split_name] = load_cluster_label_bundle(cfg)
+            if self.reuse_label_bundles:
+                combined_series = pd.concat([b.series for b in self.reuse_label_bundles.values()]).sort_index()
+                combined_series = combined_series[~combined_series.index.duplicated(keep="first")]
+                self.reuse_label_bundle_combined = ClusterLabelBundle(
+                    series=combined_series,
+                    meta={"source": "combined"},
+                    source="combined",
+                )
+            if self.reuse_label_fallback not in {"classify"}:
+                raise ValueError("reuse_cluster_labels.fallback only supports 'classify'")
+            self.logger.info(
+                "Walk-Forward reuse labels: %s",
+                {k: v.source for k, v in self.reuse_label_bundles.items()},
+            )
+            self.logger.info("Label reuse enabled; threshold fine-tuning skipped.")
+
+    def _log_weather_distribution(self, split_name: str, weather_bundle: Dict[str, np.ndarray]) -> None:
+        labels = np.asarray(weather_bundle.get("labels"), dtype=np.int64)
+        dist = {self.weather_map[idx]: int(np.sum(labels == idx)) for idx in self.weather_map}
+        mask_src = weather_bundle.get("day_mask")
+        if mask_src is None:
+            day_mask_local = np.ones_like(labels, dtype=bool)
+        else:
+            day_mask_local = np.asarray(mask_src, dtype=bool)
+        night_count = int((~day_mask_local).sum()) if day_mask_local.size else 0
+        day_labels = labels[day_mask_local]
+        day_total = max(int(day_labels.size), 1)
+        dist_percent = {name: (dist[name] / day_total * 100.0) if day_total else 0.0 for name in dist}
+        parts = [f"{name}={dist[name]} ({dist_percent[name]:.1f}%)" for name in dist]
+        self.logger.info("weather dist (%s): %s, night=%d", split_name, ", ".join(parts), night_count)
+
+    def _apply_cluster_labels_if_needed(
+        self,
+        df: pd.DataFrame,
+        weather_bundle: Dict[str, np.ndarray],
+        split_name: str,
+    ) -> Dict[str, np.ndarray]:
+        reuse_bundle = None
+        if self.reuse_labels_enabled:
+            canonical = split_name.split("-")[-1].lower()
+            reuse_bundle = self.reuse_label_bundles.get(canonical)
+            if reuse_bundle is None:
+                reuse_bundle = self.reuse_label_bundle_combined
+        if not self.reuse_labels_enabled or reuse_bundle is None:
+            self._log_weather_distribution(split_name, weather_bundle)
+            return weather_bundle
+        mask_src = weather_bundle.get("day_mask")
+        day_mask_local = (
+            np.asarray(mask_src, dtype=bool) if mask_src is not None else np.ones(len(df), dtype=bool)
+        )
+        final_labels, stats = assign_cluster_labels(
+            df.index,
+            np.asarray(weather_bundle.get("labels"), dtype=np.int64),
+            day_mask_local,
+            reuse_bundle,
+            self.reuse_label_fallback,
+            split_name,
+            self.logger,
+        )
+        weather_bundle["labels"] = final_labels
+        weather_bundle["cluster_label_source"] = reuse_bundle.source
+        weather_bundle["cluster_label_meta"] = reuse_bundle.meta
+        weather_bundle["cluster_label_stats"] = stats
+        cov_day = stats.get("day_coverage")
+        # If coverage is low, fall back to combined labels to handle foldX prefixes
+        if (
+            self.reuse_label_bundle_combined is not None
+            and reuse_bundle is not self.reuse_label_bundle_combined
+            and np.isfinite(cov_day)
+            and cov_day < float(self.reuse_label_min_coverage)
+        ):
+            self.logger.warning(
+                "Cluster labels[%s] day coverage %.3f < threshold %.3f, fallback to combined labels",
+                split_name,
+                cov_day,
+                self.reuse_label_min_coverage,
+            )
+            final_labels, stats = assign_cluster_labels(
+                df.index,
+                np.asarray(weather_bundle.get("labels"), dtype=np.int64),
+                day_mask_local,
+                self.reuse_label_bundle_combined,
+                self.reuse_label_fallback,
+                f"{split_name}-combined",
+                self.logger,
+            )
+            weather_bundle["labels"] = final_labels
+            weather_bundle["cluster_label_source"] = self.reuse_label_bundle_combined.source
+            weather_bundle["cluster_label_meta"] = self.reuse_label_bundle_combined.meta
+            weather_bundle["cluster_label_stats"] = stats
+            cov_day = stats.get("day_coverage")
+        if (
+            self.reuse_label_min_coverage
+            and np.isfinite(cov_day)
+            and cov_day < float(self.reuse_label_min_coverage)
+        ):
+            self.logger.warning(
+                "Cluster labels[%s] day coverage %.3f below warn threshold %.3f",
+                split_name,
+                cov_day,
+                self.reuse_label_min_coverage,
+            )
+        self._log_weather_distribution(split_name, weather_bundle)
+        return weather_bundle
+
     def train_all_folds(self, folds: List[Dict]) -> Dict[str, Any]:
         self.base_artifact_dir.mkdir(parents=True, exist_ok=True)
         self.base_checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -108,7 +248,7 @@ class WalkForwardTrainer:
         for fold in folds:
             fold_id = fold["id"]
             self.logger.info("=" * 80)
-            self.logger.info("寮€濮嬭缁?Fold %d/%d", fold_id, len(folds))
+            self.logger.info("Start training Fold %d/%d", fold_id, len(folds))
             self.logger.info("=" * 80)
 
             artifact_dir = self.base_artifact_dir / f"fold_{fold_id:02d}"
@@ -119,7 +259,7 @@ class WalkForwardTrainer:
             result_dir.mkdir(parents=True, exist_ok=True)
 
             feature_sets = self._prepare_fold_features(fold, artifact_dir)
-            sequence_sets = self.build_sequence_sets(feature_sets, self.seq_length, self.logger)
+            sequence_sets = self.build_sequence_sets(feature_sets, self.seq_length, self.horizons, self.logger)
             daytime_stats: Dict[str, Dict[str, Any]] = {}
             for split_name in ("train", "val", "test"):
                 meta = sequence_sets[split_name].get("meta", {}) if sequence_sets.get(split_name) else {}
@@ -127,7 +267,7 @@ class WalkForwardTrainer:
                 day_ratio = meta.get("day_ratio")
                 if day_ratio is not None:
                     self.logger.info(
-                        "Fold %d %s 鐧藉ぉ搴忓垪鍗犳瘮: %.2f%% (鏍锋湰=%s)",
+                        "Fold %d %s day sequence ratio: %.2f%% (samples=%s)",
                         fold_id,
                         split_name,
                         day_ratio * 100,
@@ -153,7 +293,7 @@ class WalkForwardTrainer:
 
             if prev_state and self.weight_cfg.get("enable", True):
                 self._load_previous_state(multi_model, prev_state)
-                self.logger.info("Fold %d 浣跨敤涓婁竴 fold 鐨勬ā鍨嬫潈閲嶅垵濮嬪寲", fold_id)
+                self.logger.info("Fold %d initialized with previous fold weights", fold_id)
 
             training_cfg = dict(self.training_cfg)
             training_cfg["checkpoint_dir"] = str(checkpoint_dir)
@@ -209,13 +349,14 @@ class WalkForwardTrainer:
                     fp,
                     ensure_ascii=False,
                     indent=2,
+                    default=_json_fallback,
                 )
 
         aggregate = self._aggregate_results(fold_results)
         summary = {"folds": fold_results, "aggregate": aggregate}
         with open(self.base_result_dir / "summary.json", "w", encoding="utf-8") as fp:
-            json.dump(summary, fp, ensure_ascii=False, indent=2)
-        self.logger.info("Walk-Forward 鍏ㄦ祦绋嬪畬鎴愶紝姹囨€荤粨鏋滃凡淇濆瓨鑷?%s", self.base_result_dir / "summary.json")
+            json.dump(summary, fp, ensure_ascii=False, indent=2, default=_json_fallback)
+        self.logger.info("Walk-Forward run complete; summary saved to %s", self.base_result_dir / "summary.json")
         return summary
 
     # ------------------------------------------------------------------ helpers
@@ -237,16 +378,26 @@ class WalkForwardTrainer:
 
         fe_cfg = self.config.get("feature_engineering", {})
         daytime_cfg = fe_cfg.get("daytime", {})
+        loc_cfg = self.config.get("data", {}).get("location", {}) or {}
         weather_classifier = WeatherClassifier(
+            location_lat=float(loc_cfg.get("lat", 38.5)),
+            location_lon=float(loc_cfg.get("lon", 105.0)),
+            elevation=float(loc_cfg.get("elevation", 1500.0)),
+            time_zone_hours=float(loc_cfg.get("time_zone_hours", 8.0)),
             ci_thresholds=fe_cfg.get("ci_thresholds", [0.2, 0.6]),
             wsi_thresholds=fe_cfg.get("wsi_thresholds", [0.3, 0.7]),
             fusion_weights=fe_cfg.get("fusion_weights", {"ci": 0.7, "wsi": 0.3}),
             daytime_ge_min=daytime_cfg.get("ge_min_wm2", 20.0),
+            daytime_mode=str(daytime_cfg.get("mode", "ghi")).lower(),
+            daytime_ghi_min=float(daytime_cfg.get("ghi_min_wm2", 5.0)),
             night_handling=daytime_cfg.get("night_handling", "exclude"),
         )
         train_weather = weather_classifier.classify(train_df)
         val_weather = weather_classifier.classify(val_df)
         test_weather = weather_classifier.classify(test_df)
+        train_weather = self._apply_cluster_labels_if_needed(train_df, train_weather, f"fold{fold['id']}-train")
+        val_weather = self._apply_cluster_labels_if_needed(val_df, val_weather, f"fold{fold['id']}-val")
+        test_weather = self._apply_cluster_labels_if_needed(test_df, test_weather, f"fold{fold['id']}-test")
         def _extract_day_mask(bundle: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
             mask = bundle.get("day_mask")
             return np.asarray(mask, dtype=bool) if mask is not None else None
@@ -278,6 +429,7 @@ class WalkForwardTrainer:
             init=vmd_cfg.get("init", 1),
             tol=vmd_cfg.get("tolerance", 1e-6),
             max_iter=vmd_cfg.get("max_iter", 500),
+            verbose=False,  # disable per-segment progress spam; handled by process_dataset
         )
         apply_mask_vmd = daytime_cfg.get("apply_mask_in_vmd", False)
         train_vmd = vmd.process_dataset(
@@ -330,6 +482,7 @@ class WalkForwardTrainer:
         apply_mask_dlfe = daytime_cfg.get("apply_mask_in_dlfe", False)
         train_dlfe = dlfe.fit_transform(
             train_dpsr,
+            dpsr_weights=None,
             day_mask=train_day_mask if apply_mask_dlfe else None,
         )
         val_dlfe = dlfe.transform(
@@ -373,7 +526,7 @@ class WalkForwardTrainer:
                 continue
             state = torch.load(best_path, map_location=self.device)
             multi_model.models[weather_name].load_state_dict(state["model_state_dict"])
-            logger.info("鍔犺浇 %s 鐨勬渶浣虫潈閲?(%s)", weather_name, best_path.name)
+            logger.info("Loaded best weights for %s (%s)", weather_name, best_path.name)
 
     def _evaluate_fold(
         self,
@@ -399,8 +552,11 @@ class WalkForwardTrainer:
         multi_horizon_metrics = evaluation_tool.evaluate_multi_horizon(
             multi_model.models,
             test_sequence,
-            horizons=self.config.get("evaluation", {}).get("horizons", [1, 3, 6]),
+            horizons=self.horizons,
         )
+        freq_min = int(self.config.get("data", {}).get("frequency_minutes", 1))
+        for h, metrics in multi_horizon_metrics.items():
+            self.logger.info("multi-horizon %d-step (%d min): %s", h, h * freq_min, metrics)
         significance_results = evaluation_tool.compare_weather_significance(per_weather_errors)
 
         payload = {
@@ -416,11 +572,11 @@ class WalkForwardTrainer:
         metrics_bundle["weather_distribution"] = weather_distribution
 
         with open(result_dir / "test_metrics.json", "w", encoding="utf-8") as fp:
-            json.dump(payload, fp, ensure_ascii=False, indent=2)
+            json.dump(payload, fp, ensure_ascii=False, indent=2, default=_json_fallback)
 
-        np.save(result_dir / "predictions.npy", predictions.flatten())
-        np.save(result_dir / "targets.npy", targets.flatten())
-        self.logger.info("Fold %d 娴嬭瘯璇勪及瀹屾垚", fold_id)
+        np.save(result_dir / "predictions.npy", predictions)
+        np.save(result_dir / "targets.npy", targets)
+        self.logger.info("Fold %d test evaluation finished", fold_id)
         return payload
 
     def _capture_state(self, multi_model: MultiWeatherModel) -> Dict[str, Dict[str, torch.Tensor]]:
@@ -462,6 +618,32 @@ class WalkForwardTrainer:
         criterion = nn.MSELoss()
         optimizers: Dict[str, torch.optim.Optimizer] = {}
         losses: Dict[str, List[float]] = {}
+        use_amp = device.type == "cuda"
+        scaler = amp.GradScaler(enabled=use_amp)
+
+        def _check_tensor_finite(name: str, tensor: torch.Tensor, weather: str, upd: int) -> None:
+            """确保张量无 NaN/Inf，若有则立刻报错并给出统计信息。"""
+            if not torch.is_floating_point(tensor):
+                return
+            total = tensor.numel()
+            if total == 0:
+                return
+            finite_mask = torch.isfinite(tensor)
+            finite_cnt = int(finite_mask.sum().item())
+            if finite_cnt != total:
+                self.logger.error(
+                    "Online learning 非有限数值: %s weather=%s update=%d shape=%s dtype=%s finite=%d/%d",
+                    name,
+                    weather,
+                    upd,
+                    tuple(tensor.shape),
+                    tensor.dtype,
+                    finite_cnt,
+                    total,
+                )
+                bad_indices = (finite_mask == 0).nonzero(as_tuple=False)[:5].cpu().tolist()
+                self.logger.error("示例异常位置（最多5个）: %s", bad_indices)
+                raise ValueError(f"online_learning {name} 含 NaN/Inf")
 
         for weather_name, model in multi_model.models.items():
             model.to(device)
@@ -480,6 +662,8 @@ class WalkForwardTrainer:
                 try:
                     batch = next(loader)
                 except StopIteration:
+                    # 当前天气的数据已耗尽，移除迭代器，避免死循环
+                    del loader_iters[weather_name]
                     continue
 
                 if isinstance(batch, (list, tuple)) and len(batch) == 3:
@@ -487,26 +671,83 @@ class WalkForwardTrainer:
                 else:
                     features, targets = batch
 
-                features = features.to(device)
-                targets = targets.to(device)
+                param_dtype = next(model.parameters()).dtype
+                features = features.to(device, dtype=param_dtype)
+                targets = targets.to(device, dtype=param_dtype)
+
+                _check_tensor_finite("features", features, weather_name, updates)
+                _check_tensor_finite("targets", targets, weather_name, updates)
 
                 optimizer = optimizers[weather_name]
                 optimizer.zero_grad()
-                preds, _ = model(features)
-                loss = criterion(preds, targets)
-                loss.backward()
-                optimizer.step()
+                try:
+                    with amp.autocast(enabled=use_amp):
+                        preds, _ = model(features)
+                        loss = criterion(preds, targets)
+                except Exception:
+                    self.logger.exception(
+                        "Online learning 前向失败: weather=%s update=%d shape=%s dtype=%s",
+                        weather_name,
+                        updates,
+                        tuple(features.shape),
+                        features.dtype,
+                    )
+                    raise
+
+                if use_amp:
+                    try:
+                        scaler.scale(loss).backward()
+                    except Exception:
+                        self.logger.exception(
+                            "Online learning 反向失败(AMP): weather=%s update=%d loss_dtype=%s",
+                            weather_name,
+                            updates,
+                            loss.dtype,
+                        )
+                        raise
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    try:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    except Exception:
+                        self.logger.exception(
+                            "Online learning optimizer step 失败(AMP): weather=%s update=%d", weather_name, updates
+                        )
+                        raise
+                else:
+                    try:
+                        loss.backward()
+                    except Exception:
+                        self.logger.exception(
+                            "Online learning 反向失败: weather=%s update=%d loss_dtype=%s",
+                            weather_name,
+                            updates,
+                            loss.dtype,
+                        )
+                        raise
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    try:
+                        optimizer.step()
+                    except Exception:
+                        self.logger.exception(
+                            "Online learning optimizer step 失败: weather=%s update=%d", weather_name, updates
+                        )
+                        raise
 
                 losses[weather_name].append(float(loss.detach().cpu()))
                 updates += 1
                 if updates >= max_updates:
                     break
 
+            if not loader_iters:
+                break
+
         torch.save(
             {w: model.state_dict() for w, model in multi_model.models.items()},
             checkpoint_dir / "online_learning_state.pth",
         )
-        self.logger.info('Fold %d 在线学习完成，共执行 %d 次参数更新', fold_id, updates)
+        self.logger.info('Fold %d online learning finished, updates=%d', fold_id, updates)
         return {
             "updates": updates,
             "average_loss": {w: float(np.mean(loss_list)) if loss_list else None for w, loss_list in losses.items()},
@@ -516,12 +757,21 @@ class WalkForwardTrainer:
         if not fold_results:
             return {}
 
-        overall_keys = fold_results[0]["test_metrics"].keys()
+        def _as_dict(obj: Any) -> Dict[str, Any]:
+            if hasattr(obj, "to_dict"):
+                try:
+                    return obj.to_dict()
+                except Exception:
+                    return {}
+            return obj if isinstance(obj, dict) else {}
+
+        first_metrics = _as_dict(fold_results[0]["test_metrics"])
+        overall_keys = first_metrics.keys()
         aggregate_overall: Dict[str, float] = {}
         for key in overall_keys:
             values = []
             for fold in fold_results:
-                metric_block = fold["test_metrics"]
+                metric_block = _as_dict(fold["test_metrics"])
                 value = metric_block.get(key) if isinstance(metric_block, dict) else None
                 if isinstance(value, (int, float)):
                     values.append(float(value))
@@ -533,7 +783,8 @@ class WalkForwardTrainer:
             per_weather = fold.get("per_weather_metrics", {})
             for weather, metric_map in per_weather.items():
                 weather_bucket = per_weather_agg.setdefault(weather, {})
-                for metric_name, metric_value in metric_map.items():
+                metric_dict = _as_dict(metric_map)
+                for metric_name, metric_value in metric_dict.items():
                     weather_bucket.setdefault(metric_name, []).append(metric_value)
         per_weather_summary = {
             weather: {metric: float(np.mean(values)) for metric, values in metrics.items()}

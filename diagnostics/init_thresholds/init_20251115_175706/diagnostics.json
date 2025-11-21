@@ -1,0 +1,62 @@
+{
+  "cluster_info": {
+    "cluster_to_weather": {
+      "2": 0,
+      "0": 1,
+      "1": 2
+    },
+    "counts": {
+      "sunny": 214,
+      "cloudy": 23346,
+      "overcast": 727
+    },
+    "silhouette": 0.9102162718772888
+  },
+  "ci": {
+    "low_boundary": {
+      "value": 0.0576200061274967,
+      "method": "gaussian",
+      "band_p10": null,
+      "band_p90": null
+    },
+    "high_boundary": {
+      "value": 0.3576153624578196,
+      "method": "gaussian",
+      "band_p10": null,
+      "band_p90": null
+    }
+  },
+  "wsi": {
+    "low_boundary": {
+      "value": 0.9798764320038248,
+      "method": "gaussian",
+      "band_p10": null,
+      "band_p90": null
+    },
+    "high_boundary": {
+      "value": 0.7836996954701916,
+      "method": "gaussian",
+      "band_p10": null,
+      "band_p90": null
+    }
+  },
+  "gmm": {
+    "covariance_type": "diag",
+    "bic": {
+      "full": 432198.5033319072,
+      "diag": 256540.37511521252
+    },
+    "converged": true,
+    "weights": [
+      0.11747394508518169,
+      0.8785197199653845,
+      0.004006334949433783
+    ],
+    "means_shape": [
+      3,
+      3
+    ],
+    "agreement_with_kmeans": 0.07633713509284802
+  },
+  "notes": "Use thresholds.ci.* and thresholds.wsi.* to populate feature_engineering in config.yaml."
+}

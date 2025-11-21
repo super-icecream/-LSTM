@@ -1,67 +1,64 @@
 #!/bin/bash
-# DLFE-LSTM-WSI项目环境安装脚本 (支持 GPU/CPU)
+# DLFE-LSTM-WSI environment setup script (GPU/CPU)
+# Creates the conda env at a fixed prefix: <repo>/.conda
 
-set -e
+set -euo pipefail
 
-ENV_NAME="dlfe-lstm-wsi"
 YAML_FILE="environment/environment.yml"
 REQ_FILE="environment/requirements.txt"
 
 usage() {
-    echo "Usage: $0 [--cpu]"
-    echo "  --cpu  使用CPU版本的PyTorch"
+  echo "Usage: $0 [--cpu]"
+  echo "  --cpu   install CPU-only PyTorch"
 }
 
 USE_CPU=false
 while [[ $# -gt 0 ]]; do
-    case $1 in
-        --cpu)
-            USE_CPU=true
-            shift
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            echo "未知参数: $1"
-            usage
-            exit 1
-            ;;
-    esac
+  case "$1" in
+    --cpu) USE_CPU=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1"; usage; exit 1 ;;
+  esac
 done
 
-if ! command -v conda &> /dev/null; then
-    echo "错误: Conda未安装，请先安装Anaconda或Miniconda"
-    exit 1
+if ! command -v conda >/dev/null 2>&1; then
+  echo "Error: conda not found. Please install Anaconda or Miniconda."
+  exit 1
 fi
 
-echo "创建conda环境: ${ENV_NAME}"
-conda env remove -n ${ENV_NAME} -y >/dev/null 2>&1 || true
-conda env create -f ${YAML_FILE}
+# Resolve project root and env prefix
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ENV_PREFIX="${PROJECT_ROOT}/.conda"
 
+echo "Creating conda environment at prefix: ${ENV_PREFIX}"
+conda env remove -p "${ENV_PREFIX}" -y >/dev/null 2>&1 || true
+conda env create -f "${YAML_FILE}" -p "${ENV_PREFIX}"
+
+# Activate the new env
 source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate ${ENV_NAME}
+conda activate "${ENV_PREFIX}"
 
 if ${USE_CPU}; then
-    echo "切换至CPU版本的PyTorch"
-    pip uninstall -y torch torchvision torchaudio || true
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+  echo "Switching to CPU-only PyTorch wheels"
+  pip uninstall -y torch torchvision torchaudio || true
+  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 fi
 
-echo "安装额外pip依赖"
-pip install -r ${REQ_FILE}
+echo "Installing extra pip dependencies"
+pip install -r "${REQ_FILE}"
 pip install pytest pytest-cov black flake8 mypy
 
-echo "验证核心依赖"
+echo "Verifying core dependencies"
 python - <<'PY'
 import torch, numpy, pandas, plotly
-print(f"PyTorch版本: {torch.__version__}")
-print(f"NumPy版本: {numpy.__version__}")
-print(f"Pandas版本: {pandas.__version__}")
-print(f"Plotly版本: {plotly.__version__}")
-print(f"CUDA 可用: {torch.cuda.is_available()}")
+print(f"PyTorch: {torch.__version__}")
+print(f"NumPy: {numpy.__version__}")
+print(f"Pandas: {pandas.__version__}")
+print(f"Plotly: {plotly.__version__}")
+print(f"CUDA available: {torch.cuda.is_available()}")
 PY
 
-echo "环境安装完成！"
-echo "使用 'conda activate ${ENV_NAME}' 激活环境"
+echo "Environment setup complete."
+echo "Activate with: conda activate \"C:\\Users\\Administrator\\桌面\\专利\\DLFE-LSTM-WSI\\.conda\""
+

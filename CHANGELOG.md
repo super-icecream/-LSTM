@@ -201,7 +201,7 @@
 ```bash
 # 方式1: 使用conda（推荐）
 conda env update -f environment.yml --prune
-conda activate dlfe-lstm-wsi
+conda activate "C:\Users\Administrator\桌面\专利\DLFE-LSTM-WSI\.conda"
 
 # 方式2: 使用pip
 pip install -r requirements.txt --upgrade

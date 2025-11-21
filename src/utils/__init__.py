@@ -12,6 +12,11 @@ Components:
 from .config_loader import ConfigLoader, ConfigSchema
 from .logger import ExperimentLogger, TensorBoardLogger, get_logger as _base_get_logger
 from .checkpoint import CheckpointManager
+from .cluster_labels import (
+    ClusterLabelBundle,
+    load_cluster_label_bundle,
+    assign_cluster_labels,
+)
 
 # 版本信息
 __version__ = "1.0.0"
@@ -25,6 +30,9 @@ __all__ = [
     'TensorBoardLogger',
     'get_logger',
     'CheckpointManager',
+    'ClusterLabelBundle',
+    'load_cluster_label_bundle',
+    'assign_cluster_labels',
     'setup_experiment',
     'load_config',
     'create_logger',

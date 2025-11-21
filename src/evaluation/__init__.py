@@ -222,7 +222,7 @@ def get_evaluation_config(device: Optional[str] = None) -> Dict:
             'batch_size': 64,
             'num_workers': 4,
             'pin_memory': True,
-            'horizons': [1, 3, 6],  # 10min, 30min, 60min
+            'horizons': [1, 2, 4],  # 15min, 30min, 60min
             'weather_types': ['sunny', 'cloudy', 'overcast']
         },
         

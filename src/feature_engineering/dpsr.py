@@ -708,20 +708,21 @@ class DPSR:
         Returns:
             Tuple[重构特征矩阵, 权重字典]
         """
-        # ??? numpy ??
+        # 统一转换为 numpy 数组
         if isinstance(data, pd.DataFrame):
             data_array = data.values
         else:
             data_array = np.asarray(data)
 
         original_n_samples, n_features = data_array.shape
-        logger.info(f"???DPSR????: {original_n_samples}????, {n_features}????")
+        # Avoid non-ASCII text to prevent mojibake on some consoles
+        logger.info("DPSR input: samples=%d, features=%d", original_n_samples, n_features)
 
-        # ??????????????????????????????????
+        # 若未提供标签，使用下一时刻的数值作为伪标签
         if labels is None:
-            #  ??????????
+            # 滚动一步生成伪标签
             labels = np.roll(data_array[:, 0], -1)
-            labels[-1] = labels[-2]  # ??????????????
+            labels[-1] = labels[-2]  # 用倒数第二个补齐最后一个标签
         labels = np.asarray(labels)
 
         mask_array = self._prepare_day_mask(day_mask, original_n_samples)
@@ -729,7 +730,7 @@ class DPSR:
             valid_indices = np.where(mask_array)[0]
             if not valid_indices.size:
                 target_dim = self._default_target_dim()
-                logger.warning("DPSR day mask ????????????????????")
+                logger.warning("DPSR day_mask has no true positions after filtering")
                 zeros = np.zeros((original_n_samples, target_dim), dtype=np.float32)
                 return zeros, {}
             data_array = data_array[valid_indices]
@@ -805,9 +806,16 @@ class DPSR:
             dtype=reconstructed_features.dtype,
         )
         full_features[index_map] = reconstructed_features[:len(index_map)]
-        logger.info(f"DPSR??: ??={full_features.shape}")
-        logger.info(f"DPSR??: ??={full_features.shape}")
+        # 统计全局权重并标记为已拟合
+        if time_weights:
+            W = np.stack(list(time_weights.values()), axis=0)
+            self.global_weights = W.mean(axis=0)
+        else:
+            # 若极端情况下没有任何时刻成功学习，使用均匀权重占位
+            self.global_weights = np.ones(n_features) / max(n_features, 1)
+        self.is_fitted = True
 
+        logger.info("DPSR training done: output_shape=%s, weight_times=%d", tuple(full_features.shape), len(time_weights))
         return full_features, time_weights
 
 
@@ -846,10 +854,10 @@ class DPSR:
 
         n_samples = data_array.shape[0]
 
-        # ???????????????
+        # 按全局权重做动态重构
         reconstructed_features = self.dynamic_reconstruction(data_array, self.global_weights)
 
-        # ????????????
+        # 长度对齐：不足填充，超出截断
         if reconstructed_features.shape[0] < n_samples:
             padding = np.zeros((n_samples - reconstructed_features.shape[0],
                                reconstructed_features.shape[1]))
