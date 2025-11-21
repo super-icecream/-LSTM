@@ -1,4 +1,4 @@
-﻿# DLFE-LSTM-WSI 涓婚厤缃枃浠?
+# DLFE-LSTM-WSI 主配置文件
 project:
   name: "DLFE-LSTM-WSI"
   version: "1.0.0"
@@ -9,8 +9,8 @@ project:
   results_dir: ./experiments/results
 
 data:
-  dataset: "鐢樿們鍏変紡鍔熺巼棰勬祴鏁版嵁闆?
-  raw_dir: "./datas/2. 鐢樿們鍏変紡鍔熺巼棰勬祴鏁版嵁闆?data_original/solar_stations"
+  dataset: "甘肃光伏功率预测数据集"
+  raw_dir: "./datas/2. 甘肃光伏功率预测数据集/data_original/solar_stations"
   merge_method: "single"
   train_ratio: 0.7
   val_ratio: 0.2
@@ -70,8 +70,8 @@ feature_engineering:
     wsi: 0.3
   reuse_cluster_labels:
     enabled: true
-    fallback: classify    # classify | drop (褰撳墠浠呮敮鎸?classify)
-    min_coverage: 0.95    # 鏃ラ棿瑕嗙洊鐜囦綆浜庤闃堝€兼椂鍙戝嚭璀﹀憡
+    fallback: classify    # classify | drop (当前仅支持 classify)
+    min_coverage: 0.95    # 日间覆盖率低于该阈值时发出警告
     splits:
       train:
         labels_path: diagnostics/init_thresholds/init_20251119_235137/cluster_labels.npy
@@ -86,7 +86,8 @@ feature_engineering:
         timestamps_path: diagnostics/init_thresholds/init_20251120_120245/cluster_timestamps.parquet
         meta_path: diagnostics/init_thresholds/init_20251120_120245/cluster_labels_meta.json
   daytime:
-    # 鏃ラ棿鎺╃爜锛氬浐鍖栦负 GHI 娉曪紝闃堝€?5 W/m虏锛堝闇€鏀瑰洖 GE 鍙垏鎹?mode 骞惰皟鏁?ge_min_wm2锛?    mode: ghi
+    # 日间掩码：固化为 GHI 法，阈值 5 W/m²（如需改回 GE 可切换 mode 并调整 ge_min_wm2）
+    mode: ghi
     ghi_min_wm2: 5.0
     ge_min_wm2: 20.0
     night_handling: exclude

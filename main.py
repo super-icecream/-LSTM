@@ -1,22 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""DLFE-LSTM-WSI 椤圭洰涓诲叆鍙?
-
-璇ヨ剼鏈覆鑱旈厤缃姞杞姐€佹暟鎹澶勭悊銆佺壒寰佸伐绋嬨€佹ā鍨嬭缁冧互鍙婅瘎浼版祦绋嬶紝
-鎸夌収銆奃LFE-LSTM-WSI-4 - 鏈€缁堟柟妗堟€荤粨銆嬬殑鏋舵瀯瀹炵幇鐪熷疄鏁版嵁椹卞姩鐨勬祦姘寸嚎銆?
-
-褰撳墠瀹炵幇鏀寔浠ヤ笅妯″紡锛?
-- ``prepare``锛氬彧杩愯鏁版嵁/鐗瑰緛娴佹按绾垮苟缂撳瓨缁撴灉锛?
-- ``train``锛氭墽琛屽畬鏁寸殑璁粌 + 璇勪及娴佺▼锛?
-- ``test``锛氬姞杞芥寚瀹氳缁冧骇鐗╋紝瀵规祴璇曢泦閲嶆柊璇勪及銆?
-
-鍚庣画鍙互鍦ㄦ鍩虹涓婃墿灞?``predict``銆乣`serve``銆乣`optimize`` 绛夋ā寮忋€?
-"""
 
 from __future__ import annotations
 
 # ========================================
-# 鍏ㄥ眬鏃ュ織閰嶇疆锛堝繀椤诲湪瀵煎叆鍏朵粬妯″潡涔嬪墠锛?
+# 全局日志配置（必须在导入其他模块之前）
 # ========================================
 import logging
 import sys
@@ -31,8 +19,7 @@ console_formatter = logging.Formatter('%(message)s')
 console_handler.setFormatter(console_formatter)
 root_logger.addHandler(console_handler)
 root_logger.setLevel(logging.INFO)
-# ========================================
-# 强制标准输出/错误为 UTF-8，避免终端乱码
+
 try:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -184,7 +171,7 @@ def resolve_paths(config: Dict, run_name: Optional[str]) -> PipelinePaths:
     results_dir = run_dir / "results" if run_dir else None
     artifacts_dir = (run_dir / "artifacts") if run_dir else artifacts_root
 
-    # 鍒涘缓鍩虹鐩綍
+    # 创建基础目录
     for directory in [processed_dir, features_dir, splits_dir, artifacts_dir, runs_root]:
         directory.mkdir(parents=True, exist_ok=True)
     if run_dir:
@@ -263,7 +250,7 @@ def load_or_prepare_merged_dataset(
     force_rebuild: bool,
 ):
     """
-    鍔犺浇鎴栭噸鏂版瀯寤哄悎骞跺悗鐨勫師濮嬫暟鎹泦锛岃繑鍥濪ataFrame鍙奃ataLoader瀹炰緥銆?
+    加载或重新构建合并后的原始数据集，返回 DataFrame 及 DataLoader 实例。
     """
 
     loader_params_path = paths.artifacts / "dataloader_params.json"
@@ -290,23 +277,23 @@ def load_or_prepare_merged_dataset(
             selected_station=selected_station,
         )
         if not station_data:
-            raise FileNotFoundError(f"鍘熷鏁版嵁鐩綍 {paths.raw} 涓湭鎵惧埌浠讳綍 CSV 鏁版嵁鏂囦欢")
+            raise FileNotFoundError(f"原始数据目录 {paths.raw} 中未找到任何 CSV 数据文件")
 
         if len(station_data) == 1:
             merged = next(iter(station_data.values()))
-            logger.info("æ£æµå°åç«ç¹æ°æ®ï¼è·³è¿åå¹¶é¶æ®µ")
+            logger.info("检测到单站点数据，跳过合并阶段")
         else:
             if merge_method == "single":
                 merged = next(iter(station_data.values()))
             else:
                 merged = data_loader.merge_stations(station_data, method=merge_method)
-                logger.info(f"å¤ç«ç¹æ°æ®åå¹¶å®æï¼éç¨æ¹æ³ {merge_method}")
+                logger.info(f"多站点数据合并完成，采用方法 {merge_method}")
 
         merged.sort_index(inplace=True)
         merged = data_loader.handle_missing_values(merged)
         passed, quality_report = data_loader.validate_data_quality(merged)
         if not passed:
-            logger.warning(f"鏁版嵁璐ㄩ噺妫€鏌ュ瓨鍦ㄩ棶棰? {quality_report.get('issues', [])}")
+            logger.warning(f"数据质量检查存在问题: {quality_report.get('issues', [])}")
 
         paths.processed.mkdir(parents=True, exist_ok=True)
         merged.to_parquet(paths.processed / "merged.parquet")
@@ -316,19 +303,19 @@ def load_or_prepare_merged_dataset(
     else:
         passed, quality_report = data_loader.validate_data_quality(merged)
         if not passed:
-            logger.warning(f"缂撳瓨鏁版嵁鐨勮川閲忔鏌ュ瓨鍦ㄩ棶棰? {quality_report.get('issues', [])}")
+            logger.warning(f"缓存数据的质量检查存在问题: {quality_report.get('issues', [])}")
 
     merged.sort_index(inplace=True)
     merged = data_loader.handle_missing_values(merged)
     passed, quality_report = data_loader.validate_data_quality(merged)
     if not passed:
-        logger.warning(f"鏁版嵁璐ㄩ噺妫€鏌ュ瓨鍦ㄩ棶棰? {quality_report.get('issues', [])}")
+        logger.warning(f"数据质量检查仍存在问题: {quality_report.get('issues', [])}")
 
     return merged, data_loader
 
 
 def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebuild: bool) -> Dict[str, Dict[str, np.ndarray]]:
-    # logger.info("寮€濮嬫墽琛屾暟鎹澶勭悊涓庣壒寰佸伐绋嬫祦姘寸嚎鈥?)  # 宸茬Щ闄ゅ啑浣欐棩蹇?
+    # logger.info("开始执行数据预处理与特征工程流水线")  # 已注释以避免重复日志
 
     merged, _ = load_or_prepare_merged_dataset(config, paths, logger, force_rebuild)
 
@@ -340,14 +327,14 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
     split_meta_path = paths.splits / "split_info.json"
     split_meta_path = paths.splits / "split_info.json"
     if not force_rebuild and (paths.splits / "train.parquet").exists() and split_meta_path.exists():
-        logger.info("æ£æµå°æ°æ®ååç¼å­ï¼ç´æ¥è¯»åè®­ç»/éªè¯/æµè¯é")
+        logger.info("检测到数据划分缓存，直接读取训练/验证/测试集")
         train_df = pd.read_parquet(paths.splits / "train.parquet")
         val_df = pd.read_parquet(paths.splits / "val.parquet")
         test_df = pd.read_parquet(paths.splits / "test.parquet")
         try:
             splitter.load_split_info(split_meta_path)
         except Exception as exc:
-            logger.warning(f"???????????????: {exc}")
+            logger.warning(f"加载数据划分元数据失败: {exc}")
     else:
         train_df, val_df, test_df = splitter.split_temporal(merged)
         splitter.save_splits(train_df, val_df, test_df, paths.splits, formats=["parquet"]) 
@@ -365,7 +352,8 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
 
     fe_cfg = config.get("feature_engineering", {})
     daytime_cfg = fe_cfg.get("daytime", {})
-    # 娉ㄥ叆绔欑偣缁忕含搴?娴锋嫈/鏃跺尯锛岀‘淇濅笌闃堝€煎垵濮嬪寲鑴氭湰涓€鑷?    location_cfg = config.get("data", {}).get("location", {}) or {}
+    # 注意：需提供站点经纬度、海拔和时区信息，确保与 WeatherClassifier 初始化基准保持一致
+    location_cfg = config.get("data", {}).get("location", {}) or {}
     weather_classifier = WeatherClassifier(
         location_lat=float(location_cfg.get("lat", 38.5)),
         location_lon=float(location_cfg.get("lon", 105.0)),
@@ -389,9 +377,9 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
         for split_name, cfg in split_cfgs.items():
             reuse_bundles[split_name] = load_cluster_label_bundle(cfg)
         if reuse_fallback not in {"classify"}:
-            raise ValueError("reuse_cluster_labels.fallback 褰撳墠浠呮敮鎸?'classify'")
+            raise ValueError("reuse_cluster_labels.fallback 当前仅支持 'classify'")
         logger.info(
-            "澶嶇敤鑱氱被鏍囩妯″紡寮€鍚紝闃堝€煎井璋冨皢鑷姩璺宠繃銆傚彲鐢ㄦ爣绛? %s",
+            "复用聚类标签模式已启用，将优先使用已有聚类标签。可用标签来源: %s",
             {k: v.source for k, v in reuse_bundles.items()},
         )
 
@@ -425,7 +413,7 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
         logger.info("")
         if stats:
             logger.info(
-                "澶嶇敤鑱氱被鏍囩[%s]: 鏃ラ棿瑕嗙洊=%.3f (%d/%d), 澶滈棿鏍锋湰=%d, 闇€fallback(鐧藉ぉ)=%d",
+                "复用聚类标签[%s]: 白天覆盖率=%.3f (%d/%d), 夜间样本=%d, 需要回退(白天)=%d",
                 split_name,
                 coverage if np.isfinite(coverage) else float("nan"),
                 day_matched,
@@ -435,14 +423,14 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
             )
         else:
             logger.info(
-                "澶╂皵鍒嗗竷(%s): 鏃犺仛绫绘爣绛撅紙瀹炴椂鍒嗙被锛夛紝澶滈棿鏍锋湰=%d",
+                "天气分布(%s): 未使用聚类标签（实时分类），夜间样本=%d",
                 split_name,
                 night_count,
             )
         dist_parts = [
             f"{name}={counts[name]} ({percentages[name]:.1f}%)" for name in counts
         ]
-        logger.info("  鍒嗗竷(%s): %s, night=%d", split_name, ", ".join(dist_parts), night_count)
+        logger.info("  分布(%s): %s, 夜间样本=%d", split_name, ", ".join(dist_parts), night_count)
         return {
             "day_total": day_total,
             "night_total": night_count,
@@ -481,7 +469,7 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
             and coverage_day < float(reuse_min_coverage)
         ):
             logger.warning(
-                "澶嶇敤鑱氱被鏍囩[%s] 鏃ラ棿瑕嗙洊鐜?%.3f 浣庝簬璀﹀憡闃堝€?%.3f",
+                "复用聚类标签[%s] 白天覆盖率=%.3f 低于告警阈值 %.3f",
                 split_name,
                 coverage_day,
                 reuse_min_coverage,
@@ -508,7 +496,7 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
             for name in agg_counts
         ]
         logger.info("")
-        logger.info("澶╂皵鍒嗗竷姹囨€?all splits): %s, night=%d", ", ".join(parts), total_night)
+        logger.info("天气整体分布(all splits): %s, 夜间样本=%d", ", ".join(parts), total_night)
 
     _log_summary()
 
@@ -573,7 +561,7 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
         train_vmd,
         day_mask=train_day_mask if apply_mask_dpsr else None,
     )
-    # 璁板綍鍚勬暟鎹泦鏍锋湰閲忎緵鑷€傚簲澶勭悊鍙傝€?
+    # 记录各数据集样本数，便于后续处理参考
     dpsr.last_split_sizes = {
         "train": len(train_vmd),
         "val": len(val_vmd),
@@ -595,7 +583,7 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
         torch.cuda.empty_cache()
         allocated = torch.cuda.memory_allocated() / 1024 ** 3
         reserved = torch.cuda.memory_reserved() / 1024 ** 3
-        logger.info("鉁?DPSR鍚庢竻鐞咷PU - 宸插垎閰? %.2f GB, 宸蹭繚鐣? %.2f GB", allocated, reserved)
+        logger.info("DPSR 结束后清理 GPU - 已分配 %.2f GB, 已保留 %.2f GB", allocated, reserved)
 
     dlfe_cfg = fe_cfg.get("dlfe", {})
     dlfe = DLFE(
@@ -645,7 +633,7 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
         "test": build_feature_set(test_dlfe, test_proc, test_weather),
     }
 
-    logger.info("鐗瑰緛宸ョ▼娴佹按绾挎墽琛屽畬鎴愶細train=%d, val=%d, test=%d", *[feature_sets[split]["features"].shape[0] for split in ("train", "val", "test")])
+    logger.info("特征工程流水线执行完成：train=%d, val=%d, test=%d", *[feature_sets[split]["features"].shape[0] for split in ("train", "val", "test")])
     return feature_sets
 
 
@@ -654,8 +642,8 @@ def prepare_feature_sets(config: Dict, paths: PipelinePaths, logger, force_rebui
     cached = {} if force_rebuild else {split: load_cached_feature_split(paths.features, split) for split in splits}
     if not force_rebuild and all(cached.get(split) for split in splits):
         # Highlight reused cache in orange and log the event.
-        print("\033[38;5;214m鈿狅笍  妫€娴嬪埌缂撳瓨鐨勭壒寰佹枃浠讹紝鐩存帴鍔犺浇锛堣烦杩嘍PSR鍜孌LFE鐗瑰緛宸ョ▼锛塡033[0m")
-        logger.info("妫€娴嬪埌缂撳瓨鐨勭壒寰佹枃浠讹紝鐩存帴鍔犺浇")
+        print("\033[38;5;214m[注意] 检测到缓存的特征文件，直接加载（跳过 VMD/DPSR/DLFE 特征流水线）\033[0m")
+        logger.info("检测到缓存的特征文件，直接加载")
         return cached  # type: ignore
 
     feature_sets = run_feature_pipeline(config, paths, logger, force_rebuild)
@@ -678,7 +666,7 @@ def build_sequence_sets(
     horizons: Optional[List[int]],
     logger,
 ) -> Dict[str, Dict[str, np.ndarray]]:
-    base_loader = PVDataLoader()  # 澶嶇敤 create_sequence_data
+    base_loader = PVDataLoader()  # 复用 PVDataLoader.create_sequence_data
     sequence_sets: Dict[str, Dict[str, np.ndarray]] = {}
     horizons = horizons or [1]
     max_horizon = max(horizons)
@@ -695,10 +683,10 @@ def build_sequence_sets(
 
         min_required = sequence_length + max_horizon - 1
         if len(features) <= min_required:
-            raise ValueError(f"{split} ???????????(len={len(features)}, sequence_length={sequence_length}, max_horizon={max_horizon})")
+            raise ValueError(f"{split} 序列样本数量不足 (len={len(features)}, sequence_length={sequence_length}, max_horizon={max_horizon})")
         if len(day_mask_points) != len(features):
             raise ValueError(
-                f"{split} ? day_mask ??({len(day_mask_points)}) ?????({len(features)}) ???"
+                f"{split} 的 day_mask 长度({len(day_mask_points)}) 与特征长度({len(features)}) 不一致"
             )
 
         seq_features, seq_targets, seq_weather = base_loader.create_sequence_data(
@@ -720,7 +708,7 @@ def build_sequence_sets(
         filtered_day_mask = seq_day_mask[keep_mask]
 
         if filtered_features.size == 0:
-            logger.warning("%s 鍓旈櫎澶滈棿鍚庢棤鏈夋晥搴忓垪锛岃妫€鏌ョ櫧澶╅槇鍊艰缃?, split)
+            logger.warning("%s 去除夜间后无有效序列，请检查日照阈值设置", split)
 
         valid_mask = filtered_weather >= 0
         if not np.all(valid_mask):
@@ -734,7 +722,7 @@ def build_sequence_sets(
         weather_counts = {name: int(np.sum(filtered_weather == idx)) for idx, name in WEATHER_MAP.items()}
 
         logger.info(
-            "%s 搴忓垪鏁版嵁(鐧藉ぉ鏈)鏋勫缓瀹屾垚: 鏍锋湰=%d/%d (淇濈暀鐜?%.1f%%), 搴忓垪闀垮害=%d, 鐗瑰緛缁村害=%d",
+            "%s 序列数据(白天样本)构建完成: 样本=%d/%d (保留率=%.1f%%), 序列长度=%d, 特征维度=%d",
             split,
             kept_sequences,
             total_sequences,
@@ -742,7 +730,7 @@ def build_sequence_sets(
             filtered_features.shape[1] if kept_sequences else sequence_length,
             filtered_features.shape[2] if kept_sequences else features.shape[1],
         )
-        logger.info("%s 澶╂皵鏍锋湰鍒嗗竷(鐧藉ぉ鏈): %s", split, weather_counts)
+        logger.info("%s 天气样本分布(白天样本): %s", split, weather_counts)
 
         sequence_sets[split] = {
             "features": filtered_features.astype(np.float32),
@@ -788,14 +776,14 @@ def build_weather_dataloaders(
     seq_meta = sequence_set.get("meta", {})
     day_ratio = seq_meta.get("day_ratio")
     if day_ratio is not None:
-        logger.info("搴忓垪闆嗙櫧澶╁崰姣? %.2f%% (鏍锋湰=%d)", day_ratio * 100, total_samples)
-    logger.info("澶╂皵鏍锋湰鏁? %s", weather_counts)
+        logger.info("序列集中白天样本占比 %.2f%% (样本数=%d)", day_ratio * 100, total_samples)
+    logger.info("各天气样本数 %s", weather_counts)
 
     min_required = max(batch_size * 10, 1000)
     scarce = {name: count for name, count in weather_counts.items() if count < min_required}
     if scarce:
         logger.warning(
-            "浠ヤ笅澶╂皵绫诲埆鏍锋湰鏁颁綆浜庢帹鑽愰槇鍊?%d: %s銆傚缓璁繍琛?scripts/diagnose_weather.py 杩涜闃堝€兼牎鍑嗐€?,
+            "以下天气类别样本数低于推荐阈值 %d: %s。建议运行 scripts/diagnose_weather.py 进行数据检查",
             min_required,
             scarce,
         )
@@ -843,7 +831,7 @@ def evaluate_multi_weather_model(
         else:
             mask = weather == weather_idx
             if not np.any(mask):
-                logger.debug("澶╂皵 %s 鏃犳牱鏈紝璺宠繃璇勪及", weather_name)
+                logger.debug("天气 %s 无样本，跳过该批评估", weather_name)
                 continue
 
         dataset = TensorDataset(
@@ -860,7 +848,7 @@ def evaluate_multi_weather_model(
 
         model = multi_model.models.get(weather_name)
         if model is None:
-            logger.warning("鏈壘鍒?%s 妯″瀷锛岃烦杩囪澶╂皵鐨勮瘎浼?, weather_name)
+            logger.warning("未找到 %s 模型，跳过该天气的评估", weather_name)
             continue
 
         model.eval()
@@ -888,9 +876,9 @@ def evaluate_multi_weather_model(
         torch.from_numpy(targets),
     )
 
-    logger.info("娴嬭瘯闆嗘€讳綋鎸囨爣: %s", overall_metrics)
+    logger.info("测试集整体指标: %s", overall_metrics)
     for weather_name, metric_obj in per_weather_results.items():
-        logger.info("澶╂皵 %s 鎸囨爣: %s", weather_name, metric_obj)
+        logger.info("天气 %s 指标: %s", weather_name, metric_obj)
 
     return overall_metrics, per_weather_results, predictions, targets, per_weather_errors
 
@@ -914,20 +902,20 @@ def build_model_builder(config: Dict, input_dim: int, sequence_length: int) -> M
 def run_walk_forward(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logger) -> None:
     walk_cfg = config.get("walk_forward", {})
     if not walk_cfg.get("enable", False):
-        logger.error("閰嶇疆涓湭鍚敤 walk_forward.enable锛屾棤娉曟墽琛?Walk-Forward 妯″紡")
+        logger.error("配置中未启用 walk_forward.enable，无法执行 Walk-Forward 模式")
         return
 
     run_name = args.run_name or datetime.now().strftime("walk_%Y%m%d_%H%M%S")
     if paths.run_dir is None or paths.run_dir.name != run_name:
         paths = resolve_paths(config, run_name)
 
-    logger.info("鍚姩 Walk-Forward 浠诲姟锛岃繍琛屽悕绉帮細%s", run_name)
+    logger.info("启动 Walk-Forward 任务，运行名称: %s", run_name)
     merged, _ = load_or_prepare_merged_dataset(config, paths, logger, args.force_rebuild)
 
     splitter = WalkForwardSplitter(config)
     folds = splitter.create_folds(merged)
     if not WalkForwardSplitter.validate_folds(folds):
-        raise RuntimeError("Walk-Forward 鍒掑垎楠岃瘉澶辫触锛岃妫€鏌ラ厤缃殑鏃堕棿绐楀彛鏄惁閲嶅彔")
+        raise RuntimeError("Walk-Forward 划分校验失败，请检查配置的时间窗口是否重叠")
 
     wf_artifact_root = paths.artifacts / "walk_forward"
     wf_artifact_root.mkdir(parents=True, exist_ok=True)
@@ -957,15 +945,15 @@ def run_walk_forward(args: argparse.Namespace, config: Dict, paths: PipelinePath
     summary = trainer.train_all_folds(folds)
     aggregate = summary.get("aggregate", {})
     if aggregate:
-        logger.info("Walk-Forward 鑱氬悎鎸囨爣: %s", json.dumps(aggregate, ensure_ascii=False))
-    logger.info("Walk-Forward 浠诲姟瀹屾垚锛岀粨鏋滅洰褰曪細%s", wf_result_root)
+        logger.info("Walk-Forward 汇总指标: %s", json.dumps(aggregate, ensure_ascii=False))
+    logger.info("Walk-Forward 任务完成，结果目录: %s", wf_result_root)
 
 
 def run_train(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logger) -> None:
     run_name = args.run_name or datetime.now().strftime("run_%Y%m%d_%H%M%S")
     if paths.run_dir is None:
         paths = resolve_paths(config, run_name)
-    logger.info("鍚姩璁粌浠诲姟锛岃繍琛屽悕绉帮細%s", run_name)
+    logger.info("启动训练任务，运行名称: %s", run_name)
 
     if not getattr(args, "force_rebuild", False):
         args.force_rebuild = choose_feature_rebuild(args, paths, logger)
@@ -990,7 +978,7 @@ def run_train(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logg
 
     training_cfg = dict(config.get("training", {}))
     if paths.checkpoints is None:
-        raise RuntimeError("鏈兘瑙ｆ瀽 checkpoint 淇濆瓨璺緞")
+        raise RuntimeError("无法解析 checkpoint 保存路径")
     training_cfg["checkpoint_dir"] = str(paths.checkpoints)
 
     device_str = config.get("project", {}).get("device", "cuda")
@@ -1000,13 +988,13 @@ def run_train(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logg
     epochs = training_cfg.get("epochs", 100)
     trainer.train_all_models(train_loaders, val_loaders, epochs=epochs)
 
-    # 鍔犺浇鏈€浣虫潈閲?
+    # 加载各天气类型的最佳权重
     for _, weather_name in WEATHER_MAP.items():
         best_path = paths.checkpoints / f"best_{weather_name}_model.pth"
         if best_path.exists():
             state = torch.load(best_path, map_location=trainer.device)
             multi_model.models[weather_name].load_state_dict(state["model_state_dict"])
-            logger.info("宸插姞杞?%s 鐨勬渶浣虫潈閲?(%s)", weather_name, best_path.name)
+            logger.info("已加载 %s 的最佳权重(%s)", weather_name, best_path.name)
 
     overall_metrics, per_weather_metrics, predictions, targets, per_weather_errors = evaluate_multi_weather_model(
         multi_model,
@@ -1018,7 +1006,7 @@ def run_train(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logg
     )
 
     if paths.results is None:
-        raise RuntimeError("鏈兘瑙ｆ瀽缁撴灉杈撳嚭鐩綍")
+        raise RuntimeError("无法解析结果输出目录")
     weather_counts = export_weather_distribution(sequence_sets["test"].get("weather", np.array([])))
 
     evaluation_tool = PerformanceMetrics(device=str(trainer.device))
@@ -1062,23 +1050,23 @@ def run_train(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logg
         weather_counts,
     )
 
-    logger.info("璁粌涓庤瘎浼板畬鎴愶紝缁撴灉宸蹭繚瀛樿嚦 %s", paths.results)
+    logger.info("训练与评估完成，结果已保存至 %s", paths.results)
 
 
 def run_test(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logger) -> None:
-    logger.info("杩涘叆娴嬭瘯妯″紡锛岃繍琛屽悕绉帮細%s", args.run_name)
+    logger.info("进入测试模式，运行名称: %s", args.run_name)
     feature_sets = prepare_feature_sets(config, paths, logger, args.force_rebuild)
     seq_length = config.get("data", {}).get("sequence_length", 24)
     horizons = list(config.get("evaluation", {}).get("horizons", [1, 2, 4]))
     sequence_sets = build_sequence_sets(feature_sets, seq_length, horizons, logger)
 
     if paths.checkpoints is None or paths.results is None:
-        raise RuntimeError("娴嬭瘯妯″紡闇€瑕佹彁渚涘悎娉曠殑杩愯鐩綍鍜屾鏌ョ偣")
+        raise RuntimeError("测试模式需要提供合法的运行目录和检查点目录")
 
     checkpoint_dir = paths.checkpoints
     available_checkpoints = list(checkpoint_dir.glob("best_*_model.pth"))
     if not available_checkpoints:
-        raise FileNotFoundError(f"鍦?{checkpoint_dir} 涓嬫湭鎵惧埌鏈€浣虫ā鍨嬫鏌ョ偣")
+        raise FileNotFoundError(f"在 {checkpoint_dir} 下未找到任何最佳模型检查点")
 
     batch_size = config.get("training", {}).get("batch_size", 64)
     num_workers = config.get("training", {}).get("num_workers", 4)
@@ -1096,11 +1084,11 @@ def run_test(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logge
     for _, weather_name in WEATHER_MAP.items():
         best_path = checkpoint_dir / f"best_{weather_name}_model.pth"
         if not best_path.exists():
-            logger.warning("鏈壘鍒?%s 鐨勬渶浣虫ā鍨嬫鏌ョ偣: %s", weather_name, best_path.name)
+            logger.warning("未找到 %s 的最佳模型检查点: %s", weather_name, best_path.name)
             continue
         state = torch.load(best_path, map_location=eval_device)
         multi_model.models[weather_name].load_state_dict(state["model_state_dict"])
-        logger.info("宸插姞杞?%s 鐨勬渶浣虫潈閲?(%s)", weather_name, best_path.name)
+        logger.info("已加载 %s 的最佳权重(%s)", weather_name, best_path.name)
 
     overall_metrics, per_weather_metrics, predictions, targets, per_weather_errors = evaluate_multi_weather_model(
         multi_model,
@@ -1154,17 +1142,17 @@ def run_test(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logge
         weather_counts,
     )
 
-    logger.info("娴嬭瘯璇勪及瀹屾垚锛岀粨鏋滀繚瀛樿嚦 %s", paths.results)
+    logger.info("测试评估完成，结果保存至 %s", paths.results)
 
 
 
 
 def choose_train_mode(args) -> str:
     """
-    浜や簰寮忛€夋嫨璁粌妯″紡锛岃繑鍥?'train' 鎴?'walk-forward'銆?
+    交互式选择训练模式，返回 'train' 或 'walk-forward'。
 
-    浼樺厛璇诲彇鐜鍙橀噺 DLFE_TRAIN_MODE锛涜嫢缁堢闈炰氦浜掑垯榛樿杩斿洖 'train'銆?
-    杈撳叆 3 鍏佽鐢ㄦ埛鍙栨秷鎵ц銆?
+    优先读取环境变量 DLFE_TRAIN_MODE；如在非交互终端则默认返回 'train'。
+    输入 3 允许用户取消执行。
     """
     env_mode = os.getenv("DLFE_TRAIN_MODE", "").strip().lower()
     if env_mode in {"train", "walk-forward"}:
@@ -1177,16 +1165,16 @@ def choose_train_mode(args) -> str:
         return "train"
 
     print()
-    print("璇烽€夋嫨璁粌妯″紡锛?)
-    print("1) 鏍囧噯璁粌")
-    print("2) Walk-Forward 楠岃瘉")
-    print("3) 鍙栨秷")
-    sel = input("璇疯緭鍏ユ暟瀛楀苟鍥炶溅 [榛樿1]: ").strip()
+    print("请选择训练模式:")
+    print("1) 标准训练")
+    print("2) Walk-Forward 验证")
+    print("3) 取消")
+    sel = input("请输入数字并回车 [默认1]: ").strip()
 
     if sel == "2":
         return "walk-forward"
     if sel == "3":
-        print("宸插彇娑堛€?)
+        print("已取消。")
         raise SystemExit(0)
     return "train"
 
@@ -1198,38 +1186,39 @@ def _feature_cache_exists(paths: PipelinePaths) -> bool:
 
 def choose_feature_rebuild(args, paths: PipelinePaths, logger) -> bool:
     """
-    鏍规嵁鐜鍙橀噺 / 浜や簰杈撳叆鍐冲畾鏄惁閲嶆柊杩愯鐗瑰緛娴佹按绾裤€?
-    杩斿洖 True 琛ㄧず浠庡ご閲嶇畻锛堢瓑鍚?--force-rebuild锛夛紝False 琛ㄧず娌跨敤缂撳瓨銆?
+    根据环境变量 / 交互输入确定是否重新运行特征工程流水线。
+
+    返回 True 表示从头重新计算（等同 --force-rebuild），False 表示使用特征缓存。
     """
     if not _feature_cache_exists(paths):
-        logger.info("鏈彂鐜扮壒寰佺紦瀛橈紝鑷姩浠庡ご閲嶇畻锛圴MD/DPSR/DLFE锛夈€?)
+        logger.info("未发现特征缓存，将自动从头重新计算（VMD/DPSR/DLFE）")
         return True
 
     env = os.getenv("DLFE_FORCE_REBUILD", "").strip().lower()
     if env in {"1", "true", "yes", "y"}:
-        logger.info("DLFE_FORCE_REBUILD=%s锛屾寜瑕佹眰浠庡ご閲嶇畻鐗瑰緛銆?, env)
+        logger.info("DLFE_FORCE_REBUILD=%s，根据要求从头重新计算特征", env)
         return True
     if env in {"0", "false", "no", "n"}:
-        logger.info("DLFE_FORCE_REBUILD=%s锛屾部鐢ㄧ幇鏈夌壒寰佺紦瀛樸€?, env)
+        logger.info("DLFE_FORCE_REBUILD=%s，使用现有特征缓存", env)
         return False
 
     try:
         if not sys.stdin.isatty():
-            logger.info("妫€娴嬪埌闈炰氦浜掔幆澧冿紝榛樿浣跨敤鐗瑰緛缂撳瓨锛堝彲鐢?DLFE_FORCE_REBUILD 瑕嗙洊锛夈€?)
+            logger.info("检测到非交互环境，默认使用特征缓存（可用 DLFE_FORCE_REBUILD 覆盖）")
             return False
     except Exception:
         return False
 
     print()
-    print("妫€娴嬪埌鐗瑰緛缂撳瓨 (data/features/*.npz)")
-    print("1) 浣跨敤缂撳瓨锛堟洿蹇級")
-    print("2) 浠庡ご閲嶇畻锛堟墽琛?VMD/DPSR/DLFE 鍏ㄦ祦绋嬶級")
-    print("3) 鍙栨秷")
-    sel = input("璇烽€夋嫨 [榛樿1]: ").strip()
+    print("检测到特征缓存 (data/features/*.npz)")
+    print("1) 使用缓存（更快）")
+    print("2) 从头重新计算（运行 VMD/DPSR/DLFE 全流程）")
+    print("3) 取消")
+    sel = input("请选择 [默认1]: ").strip()
     if sel == "2":
         return True
     if sel == "3":
-        print("宸插彇娑堛€?)
+        print("已取消。")
         raise SystemExit(0)
     return False
 
@@ -1237,7 +1226,7 @@ def run_prepare(args: argparse.Namespace, config: Dict, paths: PipelinePaths, lo
     if not getattr(args, "force_rebuild", False):
         args.force_rebuild = choose_feature_rebuild(args, paths, logger)
     prepare_feature_sets(config, paths, logger, args.force_rebuild)
-    logger.info("鐗瑰緛缂撳瓨宸插噯澶囧畬姣?)
+    logger.info("特征缓存已准备完成")
 
 
 def main() -> None:
@@ -1263,9 +1252,9 @@ def main() -> None:
         elif args.mode == "test":
             run_test(args, config, paths, logger)
         else:
-            logger.error("妯″紡 %s 鏆傛湭瀹炵幇", args.mode)
+            logger.error("模式 %s 尚未实现", args.mode)
     except Exception as exc:
-        logger.error("鎵ц杩囩▼涓彂鐢熷紓甯?, exc_info=True)
+        logger.error("执行过程中发生异常", exc_info=True)
         raise exc
     finally:
         logger.close()

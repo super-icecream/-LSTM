@@ -1,7 +1,7 @@
-﻿"""
-璇勪及鎸囨爣璁＄畻妯″潡
-瀹炵幇DLFE-LSTM-WSI绯荤粺鐨勬€ц兘璇勪及鎸囨爣璁＄畻
-鏀寔GPU鍔犻€熷拰澶氭椂闂村昂搴﹁瘎浼?"""
+"""
+评估指标计算模块
+实现DLFE-LSTM-WSI系统的性能评估指标计算
+支持GPU加速和多时间尺度评估"""
 
 import logging
 from dataclasses import dataclass
@@ -13,14 +13,14 @@ import torch
 from scipy import stats
 from tqdm import tqdm
 
-# 璁剧疆鏃ュ織
+# 日志配置
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class MetricsResult:
-    """璇勪及鎸囨爣缁撴灉鏁版嵁绫?""
+    """评估指标结果数据类"""
 
     rmse: float
     mae: float
@@ -31,7 +31,7 @@ class MetricsResult:
     min_error: float = 0.0
 
     def to_dict(self) -> Dict:
-        """杞崲涓哄瓧鍏告牸寮?""
+        """转换为字典格式"""
         return {
             "RMSE": self.rmse,
             "MAE": self.mae,
@@ -43,36 +43,38 @@ class MetricsResult:
         }
 
     def __str__(self) -> str:
-        """鏍煎紡鍖栬緭鍑?""
+        """格式化输出"""
         return f"RMSE: {self.rmse:.4f} | MAE: {self.mae:.4f} | NRMSE: {self.nrmse:.4f}"
 
 
 class PerformanceMetrics:
     """
-    GPU鍔犻€熺殑鎬ц兘璇勪及鎸囨爣璁＄畻绫?
-    鏀寔鐨勬寚鏍囷細
-    - RMSE: 鍧囨柟鏍硅宸?    - MAE: 骞冲潎缁濆璇樊
-    - NRMSE: 褰掍竴鍖栧潎鏂规牴璇樊
+    GPU加速的性能评估指标计算类
+    支持的指标：
+    - RMSE: 均方根误差
+    - MAE: 平均绝对误差
+    - NRMSE: 归一化均方根误差
     """
 
     def __init__(self, device: str = "cuda", epsilon: float = 1e-8):
         """
-        鍒濆鍖栬瘎浼板櫒
+        初始化评估器
 
         Args:
-            device: 璁＄畻璁惧 ('cuda' 鎴?'cpu')
-            epsilon: 闃叉闄ら浂鐨勫皬鏁?        """
+            device: 计算设备 ('cuda' 或 'cpu')
+            epsilon: 防止除零的小数
+        """
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.epsilon = epsilon
         self.results_history: List[MetricsResult] = []
 
         if self.device.type == "cuda":
-            logger.info(f"浣跨敤GPU鍔犻€? {torch.cuda.get_device_name()}")
+            logger.info(f"使用GPU加速: {torch.cuda.get_device_name()}")
         else:
-            logger.warning("CUDA涓嶅彲鐢紝浣跨敤CPU璁＄畻")
+            logger.warning("CUDA不可用，使用CPU计算")
 
     def _ensure_tensor(self, data: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
-        """纭繚鏁版嵁涓篏PU寮犻噺"""
+        """确保数据为GPU张量"""
         if isinstance(data, np.ndarray):
             data = torch.from_numpy(data).float()
         if not data.is_cuda and self.device.type == "cuda":
@@ -81,7 +83,7 @@ class PerformanceMetrics:
 
     @torch.no_grad()
     def calculate_rmse(self, predictions: Union[torch.Tensor, np.ndarray], targets: Union[torch.Tensor, np.ndarray]) -> float:
-        """璁＄畻RMSE"""
+        """计算RMSE"""
         predictions = self._ensure_tensor(predictions)
         targets = self._ensure_tensor(targets)
         mse = torch.mean((predictions - targets) ** 2)
@@ -90,7 +92,7 @@ class PerformanceMetrics:
 
     @torch.no_grad()
     def calculate_mae(self, predictions: Union[torch.Tensor, np.ndarray], targets: Union[torch.Tensor, np.ndarray]) -> float:
-        """璁＄畻MAE"""
+        """计算MAE"""
         predictions = self._ensure_tensor(predictions)
         targets = self._ensure_tensor(targets)
         mae = torch.mean(torch.abs(predictions - targets))
@@ -104,10 +106,12 @@ class PerformanceMetrics:
         normalization: str = "range",
     ) -> float:
         """
-        璁＄畻NRMSE
+        计算NRMSE
 
         Args:
-            predictions: 棰勬祴鍊?            targets: 鐪熷疄鍊?            normalization: 'range' | 'mean' | 'std'
+            predictions: 预测值
+            targets: 真实值
+            normalization: 'range' | 'mean' | 'std'
         """
         predictions = self._ensure_tensor(predictions)
         targets = self._ensure_tensor(targets)
@@ -121,7 +125,7 @@ class PerformanceMetrics:
         elif normalization == "std":
             denominator = torch.std(targets)
         else:
-            raise ValueError(f"鏈煡鐨勫綊涓€鍖栨柟寮?{normalization}")
+            raise ValueError(f"未知的归一化方式: {normalization}")
 
         denominator = torch.clamp(denominator, min=self.epsilon)
         nrmse = rmse / denominator
@@ -135,9 +139,11 @@ class PerformanceMetrics:
         calculate_ci: bool = True,
     ) -> MetricsResult:
         """
-        璁＄畻鎵€鏈夎瘎浼版寚鏍?
+        计算所有评估指标
         Args:
-            predictions: 棰勬祴鍊?            targets: 鐪熷疄鍊?            calculate_ci: 鏄惁璁＄畻缃俊鍖洪棿
+            predictions: 预测值
+            targets: 真实值
+            calculate_ci: 是否计算置信区间
         """
         predictions = self._ensure_tensor(predictions)
         targets = self._ensure_tensor(targets)
@@ -176,10 +182,11 @@ class PerformanceMetrics:
         horizons: List[int] = [1, 2, 4],
     ) -> Dict[int, MetricsResult]:
         """
-        澶氭椂闂村昂搴﹁瘎浼?
+        多时间尺度评估
         Args:
-            model_dict: 涓変釜澶╂皵瀛愭ā鍨媨'sunny','cloudy','overcast'}
-            sequence_sets: 鍖呭惈features/targets/weather鐨勬祴璇曟暟鎹?            horizons: 棰勬祴鏃跺煙鍒楄〃
+            model_dict: 三个天气子模型{'sunny','cloudy','overcast'}
+            sequence_sets: 包含features/targets/weather的测试数据
+            horizons: 预测时域列表
         """
         features = sequence_sets["features"]
         targets = sequence_sets["targets"]
@@ -229,8 +236,7 @@ class PerformanceMetrics:
     def evaluate_by_weather(
         self, model_dict: Dict[str, torch.nn.Module], sequence_sets: Dict[str, np.ndarray]
     ) -> Tuple[pd.DataFrame, Dict[str, MetricsResult]]:
-        """
-        鍒嗗ぉ姘旂被鍨嬭瘎浼?        """
+        """分天气类型评估"""
         results_list = []
         metrics_map: Dict[str, MetricsResult] = {}
         features = sequence_sets["features"]
@@ -240,7 +246,7 @@ class PerformanceMetrics:
         for weather_idx, weather_name in enumerate(["sunny", "cloudy", "overcast"]):
             mask = weather == weather_idx if weather is not None else slice(None)
             if weather is not None and not np.any(mask):
-                logger.warning(f"缂哄皯 {weather_name} 鐨勬祴璇曟暟鎹?)
+                logger.warning(f"缺少 {weather_name} 的测试数据")
                 continue
 
             model = model_dict[weather_name].to(self.device)
@@ -268,8 +274,7 @@ class PerformanceMetrics:
     def calculate_confidence_interval(
         self, errors: torch.Tensor, confidence: float = 0.95, n_bootstrap: int = 1000
     ) -> Tuple[float, float]:
-        """
-        璁＄畻缃俊鍖洪棿锛圔ootstrap锛?        """
+        """计算置信区间（Bootstrap）"""
         errors = self._ensure_tensor(errors)
         n_samples = errors.shape[0]
 
@@ -293,8 +298,7 @@ class PerformanceMetrics:
         model2_errors: Union[torch.Tensor, np.ndarray],
         test_type: str = "paired_t",
     ) -> Dict:
-        """
-        缁熻鏄捐憲鎬ф楠?        """
+        """统计显著性检验"""
         if isinstance(model1_errors, torch.Tensor):
             model1_errors = model1_errors.cpu().numpy()
         if isinstance(model2_errors, torch.Tensor):
@@ -302,12 +306,12 @@ class PerformanceMetrics:
 
         if test_type == "paired_t":
             statistic, p_value = stats.ttest_rel(np.abs(model1_errors), np.abs(model2_errors))
-            test_name = "閰嶅t妫€楠?
+            test_name = "配对t检验"
         elif test_type == "wilcoxon":
             statistic, p_value = stats.wilcoxon(np.abs(model1_errors), np.abs(model2_errors))
-            test_name = "Wilcoxon妫€楠?
+            test_name = "Wilcoxon检验"
         else:
-            raise ValueError(f"涓嶆敮鎸佺殑妫€楠岀被鍨?{test_type}")
+            raise ValueError(f"不支持的检验类型: {test_type}")
 
         alpha = 0.05
         is_significant = p_value < alpha
@@ -321,7 +325,7 @@ class PerformanceMetrics:
             "p_value": float(p_value),
             "is_significant": bool(is_significant),
             "cohens_d": float(cohens_d),
-            "conclusion": "鏄捐憲宸紓" if is_significant else "鏃犳樉钁楀樊寮?,
+            "conclusion": "显著差异" if is_significant else "无显著差异",
             "model1_mean_error": float(np.mean(np.abs(model1_errors))),
             "model2_mean_error": float(np.mean(np.abs(model2_errors))),
         }
@@ -329,7 +333,7 @@ class PerformanceMetrics:
     def compare_weather_significance(
         self, per_weather_errors: Dict[str, np.ndarray], baseline: str = "sunny", test_type: str = "paired_t"
     ) -> Dict[str, Dict]:
-        """瀵规瘮涓嶅悓澶╂皵妯″瀷璇樊鏄捐憲鎬?""
+        """对比不同天气模型误差显著性"""
         significance_summary: Dict[str, Dict] = {}
         baseline_errors = per_weather_errors.get(baseline)
         if baseline_errors is None:
@@ -346,8 +350,7 @@ class PerformanceMetrics:
         return significance_summary
 
     def get_summary_statistics(self) -> pd.DataFrame:
-        """
-        鑾峰彇鍘嗗彶璇勪及缁撴灉鐨勬眹鎬荤粺璁?        """
+        """获取历史评估结果的汇总统计"""
         if not self.results_history:
             return pd.DataFrame()
 
@@ -365,7 +368,7 @@ class PerformanceMetrics:
 def export_metrics_bundle(
     overall: MetricsResult, per_weather: Dict[str, MetricsResult], multi_horizon: Dict[int, MetricsResult]
 ) -> Dict[str, Dict]:
-    """鏁寸悊璇勪及鎸囨爣锛岃緭鍑?JSON 鍙嬪ソ鏍煎紡"""
+    """整理评估指标，输出 JSON 友好格式"""
     bundle = {
         "overall": overall.to_dict() if isinstance(overall, MetricsResult) else overall,
         "per_weather": {
@@ -381,7 +384,7 @@ def export_metrics_bundle(
 
 
 def export_weather_distribution(weather_array: np.ndarray) -> Dict[str, int]:
-    """鏍规嵁澶╂皵鏍囩缁熻鍒嗗竷"""
+    """根据天气标签统计分布"""
     distribution: Dict[str, int] = {}
     for idx, label in enumerate(["sunny", "cloudy", "overcast"]):
         count = int(np.sum(weather_array == idx))
@@ -401,12 +404,12 @@ if __name__ == "__main__":
     evaluator = PerformanceMetrics(device="cuda" if torch.cuda.is_available() else "cpu")
 
     print("=" * 50)
-    print("鎬ц兘璇勪及娴嬭瘯")
+    print("性能评估测试")
     print("=" * 50)
 
     results = evaluator.calculate_all_metrics(predictions, true_values)
-    print(f"\n璇勪及缁撴灉: {results}")
-    print("\n璇︾粏鎸囨爣:")
+    print(f"\n评估结果: {results}")
+    print("\n详细指标:")
     for key, value in results.to_dict().items():
         if key == "CI_95%":
             print(f"  {key}: [{value[0]:.4f}, {value[1]:.4f}]")
@@ -418,8 +421,8 @@ if __name__ == "__main__":
     errors2 = (predictions2 - true_values).numpy()
 
     sig_test = evaluator.statistical_significance_test(errors1, errors2)
-    print("\n缁熻鏄捐憲鎬ф楠?)
+    print("\n统计显著性检验")
     for key, value in sig_test.items():
         print(f"  {key}: {value}")
 
-    print("\n娴嬭瘯瀹屾垚!")
+    print("\n测试完成!")
