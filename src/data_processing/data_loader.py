@@ -106,6 +106,16 @@ class DataLoader:
                 'humidity': [0, 100],
             },
             'error_markers': [-99, -999, -9999],
+            # 时间频率完整性检查
+            'time_integrity': {
+                'enabled': True,                # 是否启用时间频率检查
+                'resample_to_freq': True,       # 是否按频率对齐重采样（引入NaN标记缺口）
+                'tolerance_minutes': 0,         # 允许的不规则总时长
+                'max_total_missing_ratio': 0.02,# 缺口占比阈值，超出直接报错
+                'deduplicate': 'error',         # 重复时间处理: 'error'|'first'|'last'
+                'timezone': None,               # 统一时区，如 'Asia/Shanghai'
+                'round_to_nearest_freq': False, # 是否将时间四舍五入到最近频点
+            },
         }
     
     def _merge_configs(self, default: Dict, loaded: Dict) -> Dict:
@@ -144,6 +154,14 @@ class DataLoader:
             # 更新嵌套配置
             merged['outlier_detection'] = outlier_config
         
+        # 合并时间频率完整性配置
+        if 'time_integrity' in loaded:
+            ti_default = default.get('time_integrity', {})
+            ti_loaded = loaded['time_integrity'] or {}
+            merged['time_integrity'] = {**ti_default, **ti_loaded}
+        else:
+            merged['time_integrity'] = default.get('time_integrity', {})
+
         return merged
 
     def _resolve_default_data_path(self, config_path: Optional[str]) -> str:
@@ -208,7 +226,7 @@ class DataLoader:
                 raise ValueError(f"暂不支持的文件格式: {suffix}")
 
             # 统一列名空白
-            data.columns = [re.sub(r"\s+", " ", str(col)).strip() for col in data.columns]
+            data.columns = [re.sub(r"\\s+", " ", str(col)).strip() for col in data.columns]
 
             # 统一索引与列名
             data = self._prepare_dataframe(data)
@@ -218,6 +236,10 @@ class DataLoader:
             missing_cols = [col for col in self.required_columns if col not in data.columns]
             if missing_cols:
                 raise ValueError(f"数据缺少必需列: {missing_cols}")
+
+            # 时间频率完整性检查（中文普通输出）
+            data = self._ensure_datetime_index(data)
+            data, _ = self._check_time_integrity(data)
 
             # 数据完整性检查
             self._check_data_integrity(data)
@@ -277,7 +299,7 @@ class DataLoader:
         column_mapping = {
             'P': 'power',
             'Power (MW)': 'power_mw',
-            'Power (kW)': 'power',
+            'Power (kW)': 'power_kw',
             'power': 'power',
             'I': 'irradiance',
             'Global horizontal irradiance (W/m2)': 'irradiance',
@@ -309,6 +331,7 @@ class DataLoader:
 
         numeric_candidates = [
             'power_mw',
+            'power_kw',
             'power_kwh',
             'power',
             'irradiance_total',
@@ -323,13 +346,45 @@ class DataLoader:
             if col in data.columns:
                 data[col] = pd.to_numeric(data[col], errors='coerce')
 
-        # 功率列统一为kW
-        if 'power' not in data.columns and 'power_mw' in data.columns:
-            data['power'] = data['power_mw'] * 1000.0
-        elif 'power' in data.columns and data['power'].max() <= 1.5:
-            data['power'] = data['power'] * 1000.0
-        elif 'power_kwh' in data.columns:
-            data['power'] = data['power_kwh']
+        # 功率列及单位处理：仅在单位明确时继续，否则报错
+        power_columns = [c for c in data.columns if isinstance(c, str) and "power" in c.lower()]
+        detected_unit = None
+        detected_col = None
+        for col in power_columns:
+            normalized = (
+                col.lower()
+                .replace(" ", "")
+                .replace("_", "")
+                .replace("-", "")
+                .replace("(", "")
+                .replace(")", "")
+            )
+            if "mw" in normalized:
+                unit = "mw"
+            elif "kw" in normalized:
+                unit = "kw"
+            else:
+                unit = None
+            # 同时允许已映射的 power_mw/power_kw
+            if col in ("power_mw",):
+                unit = "mw"
+            if col in ("power_kw",):
+                unit = "kw"
+            if unit:
+                if detected_unit and detected_unit != unit:
+                    raise ValueError(f"检测到多个功率单位列: {detected_col}({detected_unit}) 与 {col}({unit})，请保留单一单位")
+                detected_unit = unit
+                detected_col = col
+
+        if detected_unit is None or detected_col is None:
+            raise ValueError("无法从功率列名判定单位，请在列名中包含 MW 或 kW（例如 Power (MW)/Power (kW)）")
+
+        if detected_unit == "mw":
+            data["power"] = data[detected_col] * 1000.0
+            logger.info("检测到功率单位为MW，已转换为kW供后续处理 (列名: %s)", detected_col)
+        elif detected_unit == "kw":
+            data["power"] = data[detected_col]
+            logger.info("检测到功率单位为kW，直接使用此列 (列名: %s)", detected_col)
 
         # 辐照度优先使用GHI
         if 'irradiance' not in data.columns:
@@ -357,6 +412,135 @@ class DataLoader:
                 data[col] = pd.to_numeric(data[col], errors='coerce')
 
         return data
+
+    def _ensure_datetime_index(self, df: pd.DataFrame) -> pd.DataFrame:
+        cfg = self.config.get('time_integrity', {})
+        tz = cfg.get('timezone')
+        dedup = cfg.get('deduplicate', 'error')
+        round_to = cfg.get('round_to_nearest_freq', False)
+        freq_str = f"{self.frequency_minutes}T"
+
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df = df.copy()
+            df.index = pd.to_datetime(df.index)
+
+        if tz:
+            if df.index.tz is None:
+                df.index = df.index.tz_localize(tz)
+            else:
+                df.index = df.index.tz_convert(tz)
+
+        if round_to:
+            old_index = df.index
+            new_index = df.index.round(freq_str)
+            changed = int((new_index != old_index).sum())
+            if changed > 0:
+                print(f"时间索引已四舍五入对齐到{self.frequency_minutes}分钟频点：调整 {changed} 个时间戳")
+            df = df.copy()
+            df.index = new_index
+
+        dup_cnt = int(df.index.duplicated(keep=False).sum())
+        if dup_cnt > 0:
+            if dedup == 'error':
+                print(f"错误：发现 {dup_cnt} 个重复时间戳，已设置为禁止重复，请清洗数据或修改配置 time_integrity.deduplicate")
+                raise ValueError("存在重复时间戳")
+            keep_policy = 'first' if dedup not in ('first', 'last') else dedup
+            df = df[~df.index.duplicated(keep=keep_policy)].sort_index()
+            print(f"发现重复时间戳 {dup_cnt} 个，已按 {keep_policy} 策略去重")
+        else:
+            df = df.sort_index()
+
+        return df
+
+    def _check_time_integrity(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        cfg = self.config.get('time_integrity', {})
+        enabled = cfg.get('enabled', True)
+        resample = cfg.get('resample_to_freq', True)
+        tol_minutes = int(cfg.get('tolerance_minutes', 0) or 0)
+        max_missing_ratio = float(cfg.get('max_total_missing_ratio', 0.02) or 0.02)
+        freq_str = f"{self.frequency_minutes}T"
+
+        if not enabled or df.empty:
+            return df, {
+                'enabled': enabled,
+                'expected_points': len(df.index),
+                'actual_points': len(df.index),
+                'missing_points': 0,
+                'missing_ratio': 0.0,
+                'duplicates': 0,
+                'misaligned_points': 0,
+                'irregular_steps': 0,
+            }
+
+        start, end = df.index.min(), df.index.max()
+        expected = pd.date_range(start=start, end=end, freq=freq_str)
+        expected_n = len(expected)
+        actual_unique_n = len(df.index.unique())
+
+        missing_points = max(0, expected_n - actual_unique_n)
+        missing_ratio = (missing_points / expected_n) if expected_n > 0 else 0.0
+
+        misaligned_points = int(((df.index.second != 0) | (df.index.microsecond != 0) | ((df.index.minute % self.frequency_minutes) != 0)).sum())
+        diffs = df.index.to_series().diff().dt.total_seconds().div(60.0)
+        irregular_steps = int(diffs.dropna().ne(self.frequency_minutes).sum())
+        irregular_total_minutes = (misaligned_points + irregular_steps) * self.frequency_minutes
+
+        print(f"时间频率检查：频率={self.frequency_minutes}分钟，时间跨度={start} ~ {end}")
+        print(f"期望点数={expected_n}，实际点数={actual_unique_n}，缺口点数={missing_points}（{missing_ratio:.2%}），重复点=0，不对齐/非等间隔点={misaligned_points + irregular_steps}")
+
+        top_gaps_lines: List[str] = []
+        inserted_rows = 0
+        df_out = df
+        if resample:
+            present = pd.Index(df.index)
+            on_grid = expected.isin(present)
+            gap_blocks: List[Tuple[pd.Timestamp, pd.Timestamp, int]] = []
+            if expected_n > 0:
+                run_start = None
+                run_len = 0
+                for ts, ok in zip(expected, on_grid):
+                    if not ok:
+                        if run_start is None:
+                            run_start = ts
+                        run_len += 1
+                    else:
+                        if run_len > 0:
+                            gap_blocks.append((run_start, ts - pd.Timedelta(minutes=self.frequency_minutes), run_len))
+                            run_start, run_len = None, 0
+                if run_len > 0:
+                    gap_blocks.append((run_start, expected[-1], run_len))
+
+            gap_blocks.sort(key=lambda x: x[2], reverse=True)
+            for i, (gs, ge, gl) in enumerate(gap_blocks[:3], start=1):
+                top_gaps_lines.append(f"  {i}) {gs} ~ {ge}（{gl} 点）")
+            if top_gaps_lines:
+                print("缺口区间Top3：")
+                for line in top_gaps_lines:
+                    print(line)
+
+            df_out = df.reindex(expected)
+            inserted_rows = expected_n - actual_unique_n
+            if inserted_rows > 0:
+                print(f"已按频率重采样并插入缺口行：{inserted_rows} 行（以 NaN 标记）")
+
+        if missing_ratio > max_missing_ratio:
+            print(f"错误：缺口占比 {missing_ratio:.2%} 超过阈值 {max_missing_ratio:.2%}，请检查数据或调整配置 time_integrity.max_total_missing_ratio")
+            raise ValueError("时间频率缺口占比超限")
+        if tol_minutes >= 0 and irregular_total_minutes > tol_minutes:
+            print(f"错误：不对齐/非等间隔累计 {irregular_total_minutes} 分钟 超过容忍 {tol_minutes} 分钟，请清洗时间戳或调整配置 time_integrity.tolerance_minutes")
+            raise ValueError("时间戳不对齐/步长不规则超限")
+
+        report = {
+            'enabled': enabled,
+            'expected_points': expected_n,
+            'actual_points': actual_unique_n,
+            'missing_points': missing_points,
+            'missing_ratio': missing_ratio,
+            'misaligned_points': misaligned_points,
+            'irregular_steps': irregular_steps,
+            'inserted_rows': inserted_rows,
+        }
+        return df_out, report
 
     def load_multi_station(
         self,
@@ -682,6 +866,8 @@ class DataLoader:
             method = self.config['interpolation_method']
 
         data_processed = data.copy()
+        initial_missing = int(data_processed.isna().sum().sum())
+        initial_rows = int(data_processed.shape[0])
 
         if method == 'linear':
             # 线性插值
@@ -693,19 +879,40 @@ class DataLoader:
             # 后向填充
             data_processed = data_processed.fillna(method='bfill', limit=self.config['max_consecutive_missing'])
         elif method == 'drop':
-            # 删除缺失值
+            # 删除缺失值（整行）
+            before_rows = int(data_processed.shape[0])
             data_processed = data_processed.dropna()
+            after_rows = int(data_processed.shape[0])
+            dropped_rows = before_rows - after_rows
         else:
             raise ValueError(f"不支持的缺失值处理方法: {method}")
 
-        # 检查是否还有缺失值
-        remaining_missing = data_processed.isna().sum().sum()
+        # 严格校验：主方法后不得残留缺失
+        remaining_missing = int(data_processed.isna().sum().sum())
         if remaining_missing > 0:
-            logger.warning(f"处理后仍有 {remaining_missing} 个缺失值")
-            # 使用前向填充处理剩余缺失值
-            data_processed = data_processed.fillna(method='ffill').fillna(method='bfill')
+            # 按列统计Top-N缺失、示例索引前若干
+            missing_by_col = data_processed.isna().sum().sort_values(ascending=False)
+            top_cols = ", ".join([f"{k}:{int(v)}" for k, v in missing_by_col.head(5).items()])
+            sample_indices = data_processed.index[data_processed.isna().any(axis=1)]
+            sample_preview = ", ".join([str(sample_indices[i]) for i in range(min(5, len(sample_indices)))])
+            msg = (
+                f"缺失值处理失败：方法 {method} 后仍有 {remaining_missing} 个缺失值。Top列: [{top_cols}] 示例索引: [{sample_preview}]"
+            )
+            logger.error(msg)
+            raise ValueError(msg)
 
-        logger.info(f"缺失值处理完成，方法: {method}")
+        # 成功路径：打印统计
+        if method == 'drop':
+            after_rows = int(data_processed.shape[0])
+            dropped_rows = int(initial_rows - after_rows) if 'dropped_rows' not in locals() else dropped_rows
+            logger.info(
+                f"缺失值处理完成，方法: {method} | 初始缺失: {initial_missing} | 删除样本: {dropped_rows} | 剩余缺失: 0 | 剩余样本: {after_rows}"
+            )
+        else:
+            filled_primary = initial_missing
+            logger.info(
+                f"缺失值处理完成，方法: {method} | 初始缺失: {initial_missing} | 主方法填充: {filled_primary} | 剩余缺失: 0"
+            )
         return data_processed
 
     def validate_data_quality(self, data: pd.DataFrame) -> Tuple[bool, Dict]:
