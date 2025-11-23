@@ -325,6 +325,36 @@ class DataLoader:
                 key = column_mapping.get(col.strip())
                 if key is None:
                     key = column_mapping.get(col.lower())
+            # 模糊匹配：容忍空格/括号/大小写差异，尽量映射到标准列
+            if key is None and isinstance(col, str):
+                col_norm = (
+                    col.lower()
+                    .replace(" ", "")
+                    .replace("_", "")
+                    .replace("-", "")
+                    .replace("(", "")
+                    .replace(")", "")
+                )
+                if "power" in col_norm and "mw" in col_norm:
+                    key = "power_mw"
+                elif "power" in col_norm and "kw" in col_norm:
+                    key = "power_kw"
+                elif col_norm.startswith("power"):
+                    key = "power"
+                elif "temperature" in col_norm or "temp" in col_norm:
+                    key = "temperature"
+                elif "pressure" in col_norm or "atm" in col_norm:
+                    key = "pressure"
+                elif "humidity" in col_norm or "humid" in col_norm:
+                    key = "humidity"
+                elif "irradiance" in col_norm and "direct" in col_norm:
+                    key = "dni"
+                elif "irradiance" in col_norm and "diffuse" in col_norm:
+                    key = "dhi"
+                elif "irradiance" in col_norm or col_norm.startswith("ghi"):
+                    key = "irradiance"
+                elif col_norm == "timeyearmonthdayhms" or "time" in col_norm:
+                    key = "timestamp"
             renamed[col] = key if key else col
 
         data = data.rename(columns=renamed)

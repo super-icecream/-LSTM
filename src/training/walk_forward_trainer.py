@@ -108,6 +108,11 @@ class WalkForwardTrainer:
         self.batch_size = training_cfg.get("batch_size", 64)
         self.num_workers = training_cfg.get("num_workers", 0)
 
+        # 统一装机容量到 kW
+        prated_cfg = self.config.get("evaluation", {}).get("prated")
+        self.prated_kw = self._normalize_prated_kw(prated_cfg)
+        self.power_scale: Optional[float] = None
+
         project_device = config.get("project", {}).get("device", "cuda")
         self.device = torch.device(
             "cuda" if project_device.startswith("cuda") and torch.cuda.is_available() else "cpu"
@@ -360,6 +365,40 @@ class WalkForwardTrainer:
         return summary
 
     # ------------------------------------------------------------------ helpers
+    def _normalize_prated_kw(self, prated_value: Optional[float]) -> Optional[float]:
+        """将装机容量统一转换为 kW；若值较小（<=1000）则视为 MW 并乘以1000。"""
+        if prated_value is None:
+            return None
+        try:
+            val = float(prated_value)
+        except (TypeError, ValueError):
+            return None
+        return val * 1000.0 if val <= 1000 else val
+
+    def _compute_power_scale(self, preprocessor: Preprocessor) -> Optional[float]:
+        """根据预处理器参数提取功率缩放因子（用于将归一化误差还原到物理功率尺度）。"""
+        method = getattr(preprocessor, "method", None)
+        params = getattr(preprocessor, "scaler_params", {}) or {}
+        key = "power"
+        if method == "minmax":
+            mins = params.get("min", {})
+            maxs = params.get("max", {})
+            if key in mins and key in maxs:
+                return float(maxs[key] - mins[key])
+        elif method == "standard":
+            stds = params.get("std", {})
+            if key in stds:
+                return float(stds[key])
+        elif method == "robust":
+            iqrs = params.get("iqr", {})
+            if key in iqrs:
+                return float(iqrs[key])
+        elif method == "maxabs":
+            max_abs = params.get("max_abs", {})
+            if key in max_abs:
+                return float(max_abs[key])
+        return None
+
     def _prepare_fold_features(self, fold: Dict, artifact_dir: Path) -> Dict[str, Dict[str, np.ndarray]]:
         train_df: Any = fold["train"]
         val_df: Any = fold["val"]
@@ -375,6 +414,8 @@ class WalkForwardTrainer:
         val_proc = preprocessor.transform(val_df)
         test_proc = preprocessor.transform(test_df)
         preprocessor.save_params(artifact_dir / "preprocessor.json")
+        # 记录功率缩放因子供评估还原物理量纲
+        self.power_scale = self._compute_power_scale(preprocessor)
 
         fe_cfg = self.config.get("feature_engineering", {})
         daytime_cfg = fe_cfg.get("daytime", {})
@@ -545,17 +586,20 @@ class WalkForwardTrainer:
             num_workers=num_workers,
             device=device,
             logger=self.logger,
-            prated=self.config.get("evaluation", {}).get("prated"),
+            prated=self.prated_kw,
+            power_scale=self.power_scale,
         )
 
         weather_distribution = export_weather_distribution(test_sequence.get("weather", np.array([])))
         evaluation_tool = PerformanceMetrics(
-            device=str(device), prated=self.config.get("evaluation", {}).get("prated")
+            device=str(device), prated=self.prated_kw, power_scale=self.power_scale
         )
         multi_horizon_metrics = evaluation_tool.evaluate_multi_horizon(
             multi_model.models,
             test_sequence,
             horizons=self.horizons,
+            prated=self.prated_kw,
+            power_scale=self.power_scale,
         )
         freq_min = int(self.config.get("data", {}).get("frequency_minutes", 1))
         for h, metrics in multi_horizon_metrics.items():
@@ -799,4 +843,39 @@ class WalkForwardTrainer:
             "per_weather": per_weather_summary,
             "fold_count": len(fold_results),
         }
+
+    # ------------------------------------------------------------------ helpers
+    def _normalize_prated_kw(self, prated_value: Optional[float]) -> Optional[float]:
+        """将装机容量统一转换为 kW；若值较小（<=1000）则视为 MW 并乘以1000。"""
+        if prated_value is None:
+            return None
+        try:
+            val = float(prated_value)
+        except (TypeError, ValueError):
+            return None
+        return val * 1000.0 if val <= 1000 else val
+
+    def _compute_power_scale(self, preprocessor: Preprocessor) -> Optional[float]:
+        """根据预处理器参数提取功率缩放因子（用于将归一化误差还原到物理功率尺度）。"""
+        method = getattr(preprocessor, "method", None)
+        params = getattr(preprocessor, "scaler_params", {}) or {}
+        key = "power"
+        if method == "minmax":
+            mins = params.get("min", {})
+            maxs = params.get("max", {})
+            if key in mins and key in maxs:
+                return float(maxs[key] - mins[key])
+        elif method == "standard":
+            stds = params.get("std", {})
+            if key in stds:
+                return float(stds[key])
+        elif method == "robust":
+            iqrs = params.get("iqr", {})
+            if key in iqrs:
+                return float(iqrs[key])
+        elif method == "maxabs":
+            max_abs = params.get("max_abs", {})
+            if key in max_abs:
+                return float(max_abs[key])
+        return None
 

@@ -29,7 +29,8 @@ class MetricsResult:
     std_error: float = 0.0
     max_error: float = 0.0
     min_error: float = 0.0
-    nrmse_cap: Optional[float] = None  # 以装机容量归一化的 NRMSE
+    nrmse_cap: Optional[float] = None  # 以装机容量归一化的 NRMSE（物理量纲）
+    nmae_cap: Optional[float] = None  # 以装机容量归一化的 MAE（物理量纲）
 
     def to_dict(self) -> Dict:
         """转换为字典格式"""
@@ -44,6 +45,8 @@ class MetricsResult:
         }
         if self.nrmse_cap is not None:
             data["NRMSE_cap"] = self.nrmse_cap
+        if self.nmae_cap is not None:
+            data["NMAE_cap"] = self.nmae_cap
         return data
 
     def __str__(self) -> str:
@@ -51,6 +54,8 @@ class MetricsResult:
         parts = [f"RMSE: {self.rmse:.4f}", f"MAE: {self.mae:.4f}", f"NRMSE: {self.nrmse:.4f}"]
         if self.nrmse_cap is not None:
             parts.append(f"NRMSE_cap: {self.nrmse_cap:.4f}")
+        if self.nmae_cap is not None:
+            parts.append(f"NMAE_cap: {self.nmae_cap:.4f}")
         return " | ".join(parts)
 
 
@@ -64,7 +69,7 @@ class PerformanceMetrics:
     - NRMSE_cap: 以装机容量归一化的均方根误差
     """
 
-    def __init__(self, device: str = "cuda", epsilon: float = 1e-8, prated: Optional[float] = None):
+    def __init__(self, device: str = "cuda", epsilon: float = 1e-8, prated: Optional[float] = None, power_scale: Optional[float] = None):
         """
         初始化评估器
 
@@ -75,6 +80,7 @@ class PerformanceMetrics:
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.epsilon = epsilon
         self.prated = prated
+        self.power_scale = power_scale
         self.results_history: List[MetricsResult] = []
 
         if self.device.type == "cuda":
@@ -147,6 +153,7 @@ class PerformanceMetrics:
         targets: Union[torch.Tensor, np.ndarray],
         calculate_ci: bool = True,
         prated: Optional[float] = None,
+        power_scale: Optional[float] = None,
     ) -> MetricsResult:
         """
         计算所有评估指标
@@ -164,13 +171,19 @@ class PerformanceMetrics:
         nrmse = self.calculate_nrmse(predictions, targets)
 
         nrmse_cap: Optional[float] = None
+        nmae_cap: Optional[float] = None
         effective_prated = prated if prated is not None else self.prated
+        effective_power_scale = power_scale if power_scale is not None else getattr(self, "power_scale", None)
         if effective_prated is not None:
             if effective_prated <= self.epsilon:
-                logger.warning("prated 太小，无法计算 NRMSE_cap (prated=%.6f)", effective_prated)
+                logger.warning("prated 无效，无法计算 NRMSE_cap (prated=%.6f)", effective_prated)
+            elif effective_power_scale is None:
+                logger.warning("未提供 power_scale，无法计算 *_cap 指标")
             else:
-                nrmse_cap = rmse / effective_prated
-
+                rmse_physical = rmse * effective_power_scale
+                mae_physical = mae * effective_power_scale
+                nrmse_cap = rmse_physical / effective_prated
+                nmae_cap = mae_physical / effective_prated
         errors = (predictions - targets).cpu().numpy()
         std_error = float(np.std(errors))
         max_error = float(np.max(np.abs(errors)))
@@ -190,6 +203,7 @@ class PerformanceMetrics:
             max_error=max_error,
             min_error=min_error,
             nrmse_cap=nrmse_cap,
+            nmae_cap=nmae_cap,
         )
         self.results_history.append(result)
         return result
@@ -200,6 +214,8 @@ class PerformanceMetrics:
         model_dict: Dict[str, torch.nn.Module],
         sequence_sets: Dict[str, np.ndarray],
         horizons: List[int] = [1, 2, 4],
+        prated: Optional[float] = None,
+        power_scale: Optional[float] = None,
     ) -> Dict[int, MetricsResult]:
         """
         多时间尺度评估
@@ -263,14 +279,20 @@ class PerformanceMetrics:
             if horizon_preds:
                 all_predictions = torch.cat(horizon_preds, dim=0)
                 all_targets = torch.cat(horizon_targets, dim=0)
-                results[horizon] = self.calculate_all_metrics(all_predictions, all_targets)
+                results[horizon] = self.calculate_all_metrics(
+                    all_predictions, all_targets, prated=prated, power_scale=power_scale
+                )
                 logger.info(f"multi-horizon step {horizon}: {results[horizon]}")
 
         return results
 
     @torch.no_grad()
     def evaluate_by_weather(
-        self, model_dict: Dict[str, torch.nn.Module], sequence_sets: Dict[str, np.ndarray]
+        self,
+        model_dict: Dict[str, torch.nn.Module],
+        sequence_sets: Dict[str, np.ndarray],
+        prated: Optional[float] = None,
+        power_scale: Optional[float] = None,
     ) -> Tuple[pd.DataFrame, Dict[str, MetricsResult]]:
         """分天气类型评估"""
         results_list = []
@@ -295,7 +317,9 @@ class PerformanceMetrics:
                 with torch.cuda.amp.autocast():
                     predictions, _ = model(feature_slice)
 
-            metrics = self.calculate_all_metrics(predictions, target_slice)
+            metrics = self.calculate_all_metrics(
+                predictions, target_slice, prated=prated, power_scale=power_scale
+            )
             metrics_map[weather_name] = metrics
 
             for metric_name, metric_value in metrics.to_dict().items():

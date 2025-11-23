@@ -75,6 +75,47 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 WEATHER_MAP = {0: "sunny", 1: "cloudy", 2: "overcast"}
 
 
+def normalize_prated_kw(prated_value: Optional[float]) -> Optional[float]:
+    """将装机容量统一转换为 kW；配置如果小于等于1000，则视为 MW 并乘以1000。"""
+    if prated_value is None:
+        return None
+    try:
+        val = float(prated_value)
+    except (TypeError, ValueError):
+        return None
+    # 约定：<=1000 视为 MW；否则视为 kW
+    return val * 1000.0 if val <= 1000 else val
+
+
+def compute_power_scale_from_preprocessor(preprocessor: Preprocessor) -> Optional[float]:
+    """
+    根据预处理器的缩放参数提取功率缩放因子（用于将归一化误差还原到物理功率尺度）。
+    返回 None 表示无法确定缩放因子。
+    """
+    method = getattr(preprocessor, "method", None)
+    params = getattr(preprocessor, "scaler_params", {}) or {}
+    power_key = "power"
+
+    if method == "minmax":
+        mins = params.get("min", {})
+        maxs = params.get("max", {})
+        if power_key in mins and power_key in maxs:
+            return float(maxs[power_key] - mins[power_key])
+    elif method == "standard":
+        stds = params.get("std", {})
+        if power_key in stds:
+            return float(stds[power_key])
+    elif method == "robust":
+        iqrs = params.get("iqr", {})
+        if power_key in iqrs:
+            return float(iqrs[power_key])
+    elif method == "maxabs":
+        max_abs = params.get("max_abs", {})
+        if power_key in max_abs:
+            return float(max_abs[power_key])
+    return None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="DLFE-LSTM-WSI 主程序",
@@ -349,6 +390,8 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
     val_proc = preprocessor.transform(val_df)
     test_proc = preprocessor.transform(test_df)
     preprocessor.save_params(paths.artifacts / "preprocessor.json")
+    power_scale = compute_power_scale_from_preprocessor(preprocessor)
+    prated_kw = normalize_prated_kw(config.get("evaluation", {}).get("prated"))
 
     fe_cfg = config.get("feature_engineering", {})
     daytime_cfg = fe_cfg.get("daytime", {})
@@ -816,8 +859,9 @@ def evaluate_multi_weather_model(
     device: torch.device,
     logger,
     prated: Optional[float] = None,
+    power_scale: Optional[float] = None,
 ) -> Tuple[PerformanceMetrics, Dict[str, PerformanceMetrics], np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
-    metrics_tool = PerformanceMetrics(device=str(device), prated=prated)
+    metrics_tool = PerformanceMetrics(device=str(device), prated=prated, power_scale=power_scale)
     features = sequence_set["features"]
     targets = sequence_set["targets"]
     weather = sequence_set.get("weather")
@@ -1004,7 +1048,8 @@ def run_train(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logg
         num_workers=num_workers,
         device=trainer.device,
         logger=logger,
-        prated=config.get("evaluation", {}).get("prated"),
+        prated=prated_kw,
+        power_scale=power_scale,
     )
 
     if paths.results is None:
@@ -1012,12 +1057,14 @@ def run_train(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logg
     weather_counts = export_weather_distribution(sequence_sets["test"].get("weather", np.array([])))
 
     evaluation_tool = PerformanceMetrics(
-        device=str(trainer.device), prated=config.get("evaluation", {}).get("prated")
+        device=str(trainer.device), prated=prated_kw, power_scale=power_scale
     )
     multi_horizon_metrics = evaluation_tool.evaluate_multi_horizon(
         multi_model.models,
         sequence_sets["test"],
         horizons=config.get("evaluation", {}).get("horizons", [1, 2, 4]),
+        prated=prated_kw,
+        power_scale=power_scale,
     )
     freq_min = int(config.get("data", {}).get("frequency_minutes", 1))
     for h, metrics in multi_horizon_metrics.items():
@@ -1101,18 +1148,21 @@ def run_test(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logge
         num_workers=num_workers,
         device=eval_device,
         logger=logger,
-        prated=config.get("evaluation", {}).get("prated"),
+        prated=prated_kw,
+        power_scale=power_scale,
     )
 
     weather_counts = export_weather_distribution(sequence_sets["test"].get("weather", np.array([])))
 
     evaluation_tool = PerformanceMetrics(
-        device=str(eval_device), prated=config.get("evaluation", {}).get("prated")
+        device=str(eval_device), prated=prated_kw, power_scale=power_scale
     )
     multi_horizon_metrics = evaluation_tool.evaluate_multi_horizon(
         multi_model.models,
         sequence_sets["test"],
         horizons=config.get("evaluation", {}).get("horizons", [1, 2, 4]),
+        prated=prated_kw,
+        power_scale=power_scale,
     )
     freq_min = int(config.get("data", {}).get("frequency_minutes", 1))
     for h, metrics in multi_horizon_metrics.items():
