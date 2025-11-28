@@ -1028,7 +1028,18 @@ def run_train(args: argparse.Namespace, config: Dict, paths: PipelinePaths, logg
 
     device_str = config.get("project", {}).get("device", "cuda")
     trainer_device = "cuda" if device_str.startswith("cuda") and torch.cuda.is_available() else "cpu"
-    trainer = GPUOptimizedTrainer(multi_model.models, training_cfg, device=trainer_device)
+
+    # 获取日志目录用于保存Loss曲线
+    log_dir = getattr(logger, 'run_dir', None)
+    if log_dir is None:
+        log_dir = paths.results  # 备选：使用results目录
+
+    trainer = GPUOptimizedTrainer(
+        multi_model.models,
+        training_cfg,
+        device=trainer_device,
+        log_dir=str(log_dir) if log_dir else None
+    )
 
     epochs = training_cfg.get("epochs", 100)
     trainer.train_all_models(train_loaders, val_loaders, epochs=epochs)

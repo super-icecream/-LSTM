@@ -104,14 +104,14 @@ class DPSR:
         if TORCH_AVAILABLE:
             selected_device = device
             if selected_device not in ("auto", "cpu", "cuda"):
-                logger.warning("Unknown device type %s, fallback to auto mode", selected_device)
+                logger.warning("未知设备类型 %s，已回退到自动检测模式", selected_device)
                 selected_device = "auto"
 
             if selected_device == "auto":
                 selected_device = DEFAULT_DEVICE
 
             if selected_device == "cuda" and not torch.cuda.is_available():
-                logger.warning("CUDA not available, DPSR falls back to CPU mode")
+                logger.warning("CUDA 不可用，DPSR 将回退到 CPU 模式")
                 selected_device = "cpu"
 
             self.device = selected_device
@@ -123,13 +123,13 @@ class DPSR:
                     device_name = torch.cuda.get_device_name(self._torch_device)
                 except Exception:  # pragma: no cover - driver differences
                     device_name = "CUDA"
-                logger.info("DPSR enabling GPU execution on %s", device_name)
+                logger.info("DPSR 启用 GPU 加速，设备: %s", device_name)
             else:
-                logger.info("DPSR running on CPU mode (PyTorch detected, CUDA disabled)")
+                logger.info("DPSR 运行在 CPU 模式（已检测到 PyTorch，但未启用 CUDA）")
         else:
             if device == "cuda":
-                logger.warning("PyTorch not installed; CUDA mode unavailable, using CPU")
-            logger.info("DPSR running on CPU mode (PyTorch not available)")
+                logger.warning("未安装 PyTorch，无法使用 CUDA，已自动切换到 CPU 模式")
+            logger.info("DPSR 运行在 CPU 模式（PyTorch 不可用）")
 
         logger.info(
             "DPSR初始化: 目标嵌入维度=%s, 邻域大小=%d, 正则化=%.4f",
@@ -261,7 +261,7 @@ class DPSR:
 
         grad_np = grad_tensor.detach().cpu().numpy()
         if not np.all(np.isfinite(grad_np)):
-            logger.warning("Gradient contains NaN or Inf in GPU path; zero out gradient")
+            logger.warning("梯度在 GPU 路径中出现 NaN/Inf，将梯度置零以保证稳定性")
             grad_np = np.zeros_like(weights)
         return grad_np
 
@@ -557,7 +557,7 @@ class DPSR:
             grad = np.clip(grad, -1e3, 1e3)
 
             if np.any(np.isnan(grad)) or np.any(np.isinf(grad)):
-                logger.warning("Gradient contains NaN or Inf; zero out gradient")
+                logger.warning("梯度中出现 NaN/Inf，将梯度置零以保证稳定性")
                 grad = np.zeros_like(w)
 
             return grad
@@ -716,7 +716,7 @@ class DPSR:
 
         original_n_samples, n_features = data_array.shape
         # Avoid non-ASCII text to prevent mojibake on some consoles
-        logger.info("DPSR input: samples=%d, features=%d", original_n_samples, n_features)
+        logger.info("DPSR 输入数据: 样本数=%d, 特征数=%d", original_n_samples, n_features)
 
         # 若未提供标签，使用下一时刻的数值作为伪标签
         if labels is None:
@@ -730,7 +730,7 @@ class DPSR:
             valid_indices = np.where(mask_array)[0]
             if not valid_indices.size:
                 target_dim = self._default_target_dim()
-                logger.warning("DPSR day_mask has no true positions after filtering")
+                logger.warning("DPSR day_mask 过滤后没有任何有效的白天样本")
                 zeros = np.zeros((original_n_samples, target_dim), dtype=np.float32)
                 return zeros, {}
             data_array = data_array[valid_indices]
@@ -815,7 +815,7 @@ class DPSR:
             self.global_weights = np.ones(n_features) / max(n_features, 1)
         self.is_fitted = True
 
-        logger.info("DPSR training done: output_shape=%s, weight_times=%d", tuple(full_features.shape), len(time_weights))
+        logger.info("DPSR 训练完成: 输出特征形状=%s, 成功学习权重的时间步数=%d", tuple(full_features.shape), len(time_weights))
         return full_features, time_weights
 
 

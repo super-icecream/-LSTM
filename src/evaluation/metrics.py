@@ -62,11 +62,12 @@ class MetricsResult:
 class PerformanceMetrics:
     """
     GPU加速的性能评估指标计算类
-    支持的指标：
-    - RMSE: 均方根误差
-    - MAE: 平均绝对误差
-    - NRMSE: 归一化均方根误差
-    - NRMSE_cap: 以装机容量归一化的均方根误差
+    主输出（RMSE/MAE/NRMSE）规则：
+    - 先在归一化尺度计算 raw 指标
+    - 若同时提供 power_scale 与 prated，则将误差还原到物理功率并按装机容量归一，主输出为容量归一结果（此时 NRMSE=RMSE）
+    - 否则主输出保留为归一化尺度 raw 值并给出告警
+    兼容字段：
+    - NRMSE_cap/NMAE_cap 保留用于兼容，恒等于主输出
     """
 
     def __init__(self, device: str = "cuda", epsilon: float = 1e-8, prated: Optional[float] = None, power_scale: Optional[float] = None):
@@ -157,33 +158,55 @@ class PerformanceMetrics:
     ) -> MetricsResult:
         """
         计算所有评估指标
+        主输出规则：
+        - 先在归一化尺度计算 rmse_raw/mae_raw/nrmse_raw；
+        - 若同时提供 power_scale 与 prated，则误差还原到物理功率并按容量归一：
+          rmse = rmse_raw * power_scale / prated；mae = mae_raw * power_scale / prated；nrmse = rmse；
+        - 否则保留 raw 值并给出告警；
+        兼容：nrmse_cap/nmae_cap 与主输出同值。
         Args:
             predictions: 预测值
             targets: 真实值
             calculate_ci: 是否计算置信区间
-            prated: 装机容量，若提供则计算 NRMSE_cap
+            prated: 装机容量（建议单位 kW）
+            power_scale: 训练集功率缩放因子（如 MinMax 的 max-min）
         """
         predictions = self._ensure_tensor(predictions)
         targets = self._ensure_tensor(targets)
 
-        rmse = self.calculate_rmse(predictions, targets)
-        mae = self.calculate_mae(predictions, targets)
-        nrmse = self.calculate_nrmse(predictions, targets)
+        # 1) 归一化尺度的 raw 指标
+        rmse_raw = self.calculate_rmse(predictions, targets)
+        mae_raw = self.calculate_mae(predictions, targets)
+        nrmse_raw = self.calculate_nrmse(predictions, targets)
 
-        nrmse_cap: Optional[float] = None
-        nmae_cap: Optional[float] = None
+        # 2) 还原到物理功率并按容量归一（若可用）
         effective_prated = prated if prated is not None else self.prated
         effective_power_scale = power_scale if power_scale is not None else getattr(self, "power_scale", None)
-        if effective_prated is not None:
-            if effective_prated <= self.epsilon:
-                logger.warning("prated 无效，无法计算 NRMSE_cap (prated=%.6f)", effective_prated)
-            elif effective_power_scale is None:
-                logger.warning("未提供 power_scale，无法计算 *_cap 指标")
-            else:
-                rmse_physical = rmse * effective_power_scale
-                mae_physical = mae * effective_power_scale
-                nrmse_cap = rmse_physical / effective_prated
-                nmae_cap = mae_physical / effective_prated
+
+        use_capacity_norm = (
+            effective_prated is not None
+            and effective_power_scale is not None
+            and effective_prated > self.epsilon
+        )
+
+        if use_capacity_norm:
+            rmse_phys = rmse_raw * float(effective_power_scale)
+            mae_phys = mae_raw * float(effective_power_scale)
+            rmse = rmse_phys / float(effective_prated)
+            mae = mae_phys / float(effective_prated)
+            nrmse = rmse  # 按容量归一后，NRMSE 等同于 RMSE
+        else:
+            # 缺少 prated 或 power_scale，或 prated 非法：保留 raw
+            rmse = rmse_raw
+            mae = mae_raw
+            nrmse = nrmse_raw
+            if effective_prated is None or effective_power_scale is None:
+                logger.warning(
+                    "缺少 prated 或 power_scale，主指标保留为归一化尺度（raw）。prated=%s, power_scale=%s",
+                    str(effective_prated), str(effective_power_scale)
+                )
+            elif effective_prated <= self.epsilon:
+                logger.warning("prated 无效（%.6f），主指标保留为归一化尺度（raw）", float(effective_prated))
         errors = (predictions - targets).cpu().numpy()
         std_error = float(np.std(errors))
         max_error = float(np.max(np.abs(errors)))
@@ -202,8 +225,8 @@ class PerformanceMetrics:
             std_error=std_error,
             max_error=max_error,
             min_error=min_error,
-            nrmse_cap=nrmse_cap,
-            nmae_cap=nmae_cap,
+            nrmse_cap=nrmse,  # 兼容字段：与主输出一致
+            nmae_cap=mae,      # 兼容字段：与主输出一致
         )
         self.results_history.append(result)
         return result

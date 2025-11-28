@@ -938,13 +938,13 @@ class DLFE:
                 logger.warning("DLFE: ignore DPSR weights length=%s mismatching features=%d", wlen, n_features)
                 avg_weights = None
 
-        logger.info("Building similarity matrix ...")
+        logger.info("开始构建相似度矩阵 Q ...")
         Q = self.build_similarity_matrix(X, weights=avg_weights, k_neighbors=min(50, n_samples - 1))
 
-        logger.info("Constructing Laplacian ...")
+        logger.info("开始构建图拉普拉斯矩阵 L ...")
         L = self.construct_laplacian(Q)
 
-        logger.info("Diagnosing sparsity ...")
+        logger.info("开始诊断矩阵稀疏性 ...")
         Q_diagnosis = diagnose_matrix_sparsity(Q, "Similarity Q")
         L_diagnosis = diagnose_matrix_sparsity(L, "Graph Laplacian L")
         self._sparsity_diagnosis = {
@@ -953,7 +953,7 @@ class DLFE:
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         if Q_diagnosis["should_use_sparse"] or L_diagnosis["should_use_sparse"]:
-            logger.info("Sparse matrix optimization enabled (auto-detected)")
+            logger.info("检测到高稀疏度，已启用稀疏矩阵优化路径")
         if self.use_gpu and self._torch is not None:
             import gc
 
@@ -961,14 +961,14 @@ class DLFE:
             if self._torch.cuda.is_available():
                 self._torch.cuda.empty_cache()
                 allocated = self._torch.cuda.memory_allocated() / 1024 ** 3
-                logger.info("GPU memory allocated: %.2f GB", allocated)
+                logger.info("当前 GPU 已分配显存: %.2f GB", allocated)
 
-        logger.info("Starting ADMM iterations ...")
+        logger.info("开始 ADMM 迭代优化 ...")
         if self.use_gpu and self._torch is not None:
-            logger.info("DLFE using GPU ADMM")
+            logger.info("DLFE 使用 GPU ADMM 优化")
             self.mapping_matrix = self._admm_optimization_gpu(X, L)
         else:
-            logger.info("DLFE using CPU ADMM")
+            logger.info("DLFE 使用 CPU ADMM 优化")
             self.mapping_matrix = self.admm_optimization(X, L)
 
         self.is_fitted = True

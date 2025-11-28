@@ -102,14 +102,28 @@ class WeatherClassifier:
             2: 'overcast'    # 阴天
         }
 
-        logger.info(f"天气分类器初始化: 位置({location_lat:.2f}°N, {location_lon:.2f}°E), "
-                   f"海拔{elevation}m"
-                   f"{', 时区UTC%+g' % self.time_zone_hours if self.time_zone_hours is not None else ''}"
-                   f"，日间掩码: {self.daytime_mode.upper()}"
-                   f"{'(GE≥%.2f W/m²' % self.daytime_ge_min if self.daytime_mode in {'ge','or','and'} else ''}"
-                   f"{' OR ' if self.daytime_mode=='or' else (' AND ' if self.daytime_mode=='and' else '')}"
-                   f"{'GHI≥%.2f W/m²' % self.daytime_ghi_min if self.daytime_mode in {'ghi','or','and'} else ''}"
-                   f"{')' if self.daytime_mode in {'ge','or','and'} else ''}")
+        # 构造日间掩码说明，避免 GHIGHI 这类重复输出
+        if self.daytime_mode == "ge":
+            mask_desc = "基于 GE（理论地外辐照度），阈值 GE≥%.2f W/m²" % self.daytime_ge_min
+        elif self.daytime_mode == "ghi":
+            mask_desc = "基于 GHI（实测全球水平辐照度），阈值 GHI≥%.2f W/m²" % self.daytime_ghi_min
+        elif self.daytime_mode == "or":
+            mask_desc = "联合条件: GE≥%.2f W/m² 或 GHI≥%.2f W/m²" % (
+                self.daytime_ge_min,
+                self.daytime_ghi_min,
+            )
+        else:  # "and"
+            mask_desc = "联合条件: GE≥%.2f W/m² 且 GHI≥%.2f W/m²" % (
+                self.daytime_ge_min,
+                self.daytime_ghi_min,
+            )
+
+        logger.info(
+            f"天气分类器初始化: 位置({location_lat:.2f}°N, {location_lon:.2f}°E), "
+            f"海拔{elevation}m"
+            f"{', 时区UTC%+g' % self.time_zone_hours if self.time_zone_hours is not None else ''}"
+            f"，日间掩码: {mask_desc}"
+        )
 
     def calculate_ci(self, ghi: Union[float, np.ndarray],
                     timestamp: Union[datetime, pd.DatetimeIndex]) -> Tuple[Union[float, np.ndarray], Union[bool, np.ndarray]]:
