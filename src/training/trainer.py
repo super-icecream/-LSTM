@@ -6,6 +6,8 @@ GPU优化：CUDA流并行、混合精度、梯度累积、异步数据加载
 日期：2025-09-27
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.cuda.amp as amp
@@ -84,14 +86,29 @@ class GPUOptimizedTrainer:
                  models: Dict[str, nn.Module],
                  config: Dict,
                  device: str = 'cuda',
-                 log_dir: Optional[str] = None):
+                 log_dir: Optional[str] = None,
+                 power_scale: Optional[float] = None,
+                 prated: Optional[float] = None):
         """
         参数：
         - models: 三个天气子模型字典
         - config: 训练配置
         - device: 计算设备
         - log_dir: 日志目录，用于保存loss曲线图
+        - power_scale: 功率缩放因子（用于将归一化误差还原到物理功率尺度）
+        - prated: 装机容量 (kW)
         """
+        # 验证 power_scale 和 prated 必须提供
+        if power_scale is None or prated is None:
+            raise ValueError("power_scale 和 prated 必须提供，用于计算 NRMSE")
+        if prated <= 0:
+            raise ValueError(f"prated 必须大于 0，当前值: {prated}")
+        if power_scale <= 0:
+            raise ValueError(f"power_scale 必须大于 0，当前值: {power_scale}")
+        
+        self.power_scale = power_scale
+        self.prated = prated
+        
         self.models = models
         self.available_weathers = list(models.keys())
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
@@ -123,11 +140,11 @@ class GPUOptimizedTrainer:
         else:
             self.streams = None
 
-        # 训练历史记录（扩展结构，同时记录训练/验证loss与梯度统计）
+        # 训练历史记录（使用 NRMSE 统一指标）
         self.train_history = {
             weather: {
-                'train_loss': [],
-                'val_loss': [],
+                'train_nrmse': [],
+                'val_nrmse': [],
                 'lr': [],
                 'grad_last': [],
                 'grad_avg': [],
@@ -136,7 +153,7 @@ class GPUOptimizedTrainer:
             for weather in self.available_weathers
         }
         # 添加总体历史记录
-        self.train_history['overall'] = {'train_loss': [], 'val_loss': []}
+        self.train_history['overall'] = {'train_nrmse': [], 'val_nrmse': []}
 
         # 梯度累积步数
         self.accumulation_steps = config.get('gradient_accumulation_steps', 4)
@@ -151,6 +168,16 @@ class GPUOptimizedTrainer:
         signal.signal(signal.SIGINT, self._handle_interrupt)
 
         logger.info(f"训练器初始化完成，设备: {self.device}")
+        logger.info(f"NRMSE 计算参数: power_scale={self.power_scale:.4f}, prated={self.prated:.2f} kW")
+
+    def _mse_to_nrmse(self, mse: float) -> float:
+        """将 MSE 转换为 NRMSE (%)，以装机容量归一化
+        
+        公式: NRMSE = sqrt(MSE) * power_scale / prated
+        """
+        rmse = math.sqrt(mse)
+        nrmse = rmse * self.power_scale / self.prated
+        return nrmse
 
     def _setup_optimizers(self):
         """设置优化器和学习率调度器"""
@@ -355,9 +382,10 @@ class GPUOptimizedTrainer:
                     )
                     train_results[weather_type] = result
 
-            # 记录训练loss与梯度到历史
+            # 记录训练 NRMSE 与梯度到历史
             for weather_type, result in train_results.items():
-                self.train_history[weather_type]['train_loss'].append(result['loss'])
+                train_nrmse = self._mse_to_nrmse(result['loss'])
+                self.train_history[weather_type]['train_nrmse'].append(train_nrmse)
                 self.train_history[weather_type]['lr'].append(result['lr'])
                 if self.log_gradients and 'grad_norm_last' in result:
                     self.train_history[weather_type]['grad_last'].append(result.get('grad_norm_last', 0.0))
@@ -373,29 +401,30 @@ class GPUOptimizedTrainer:
             if val_loaders:
                 val_results = self.validate_all(val_loaders)
 
-                # 记录验证loss到历史
+                # 记录验证 NRMSE 到历史
                 for weather_type, result in val_results.items():
-                    self.train_history[weather_type]['val_loss'].append(result['loss'])
+                    val_nrmse = self._mse_to_nrmse(result['loss'])
+                    self.train_history[weather_type]['val_nrmse'].append(val_nrmse)
 
-                # 计算并记录总体加权loss
+                # 计算并记录总体加权 NRMSE
                 total_train_samples = sum(len(train_loaders[w].dataset) for w in train_results.keys())
                 total_val_samples = sum(len(val_loaders[w].dataset) for w in val_results.keys())
 
                 if total_train_samples > 0:
-                    overall_train_loss = sum(
+                    overall_train_mse = sum(
                         train_results[w]['loss'] * len(train_loaders[w].dataset)
                         for w in train_results.keys()
                     ) / total_train_samples
-                    self.train_history['overall']['train_loss'].append(overall_train_loss)
+                    self.train_history['overall']['train_nrmse'].append(self._mse_to_nrmse(overall_train_mse))
 
                 if total_val_samples > 0:
-                    overall_val_loss = sum(
+                    overall_val_mse = sum(
                         val_results[w]['loss'] * len(val_loaders[w].dataset)
                         for w in val_results.keys()
                     ) / total_val_samples
-                    self.train_history['overall']['val_loss'].append(overall_val_loss)
+                    self.train_history['overall']['val_nrmse'].append(self._mse_to_nrmse(overall_val_mse))
 
-                # 更新最佳模型
+                # 更新最佳模型（仍用 MSE 比较，因为 NRMSE 是单调函数）
                 for weather_type, result in val_results.items():
                     if result['loss'] < best_metrics[weather_type]['loss']:
                         best_metrics[weather_type]['loss'] = result['loss']
@@ -420,28 +449,30 @@ class GPUOptimizedTrainer:
             if val_loaders:
                 logger.debug(f"验证结果: {val_results}")
 
-            # 单行刷新训练进度（中文标签+更友好的格式）
+            # 单行刷新训练进度（显示 NRMSE %）
             progress_percent = (epoch + 1) / epochs * 100
             weather_name_map = {"sunny": "晴天", "cloudy": "多云", "overcast": "阴天"}
             def _fmt_train_metrics(weather: str, m: Dict[str, float]) -> str:
-                base = f"{weather_name_map.get(weather, weather)}={m['loss']:.4f}"
+                nrmse_pct = self._mse_to_nrmse(m['loss']) * 100
+                base = f"{weather_name_map.get(weather, weather)}={nrmse_pct:.2f}%"
                 if self.log_gradients and 'grad_norm_last' in m:
                     return base + f"(g{m['grad_norm_last']:.2f})"
                 return base
-            train_loss_str = "， ".join(
+            train_nrmse_str = "， ".join(
                 _fmt_train_metrics(weather, metrics) for weather, metrics in train_results.items()
             ) if train_results else "无训练数据"
-            val_loss_str = "， ".join(
-                f"{weather_name_map.get(weather, weather)}={metrics['loss']:.4f}"
+            val_nrmse_str = "， ".join(
+                f"{weather_name_map.get(weather, weather)}={self._mse_to_nrmse(metrics['loss']) * 100:.2f}%"
                 for weather, metrics in val_results.items()
             ) if val_results else "无验证数据"
             progress_line = (
                 f"训练进度 {epoch + 1}/{epochs} ({progress_percent:.1f}%) ｜ "
-                f"训练损失：{train_loss_str} ｜ 验证损失：{val_loss_str}"
+                f"训练损失：{train_nrmse_str} ｜ 验证损失：{val_nrmse_str}"
             )
             _write_progress_single_line(progress_line)
 
         print()
+        sys.stdout.flush()  # 确保换行输出完成
         logger.info("训练完成!")
 
         # 训练完成后自动保存历史和绘制曲线
@@ -682,10 +713,11 @@ class GPUOptimizedTrainer:
         save_path = save_dir / 'loss_history.json'
         with open(save_path, 'w', encoding='utf-8') as f:
             json.dump(self.train_history, f, ensure_ascii=False, indent=2)
-        logger.info(f"[*] 训练历史已保存至: {save_path}")
+        print(f"[*] 训练历史已保存至: {save_path}")
+        sys.stdout.flush()
 
     def plot_loss_curves(self, save_dir: Optional[str] = None) -> None:
-        """绘制并保存Loss曲线图"""
+        """绘制并保存 NRMSE 曲线图"""
         save_dir = Path(save_dir) if save_dir else self.log_dir
         save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -699,26 +731,26 @@ class GPUOptimizedTrainer:
 
         for ax, weather in zip(axes, self.available_weathers):
             history = self.train_history.get(weather, {})
-            train_loss = history.get('train_loss', [])
-            val_loss = history.get('val_loss', [])
+            train_nrmse = history.get('train_nrmse', [])
+            val_nrmse = history.get('val_nrmse', [])
 
-            if not train_loss:
+            if not train_nrmse:
                 ax.text(0.5, 0.5, '无数据', ha='center', va='center', fontsize=14)
                 ax.set_title(f'{weather_names.get(weather, weather)} 模型', fontsize=13, fontweight='bold')
                 continue
 
-            epochs = range(1, len(train_loss) + 1)
+            epochs = range(1, len(train_nrmse) + 1)
 
-            # 绘制训练损失曲线
-            ax.plot(epochs, train_loss, 'b-', label='训练损失', linewidth=2)
+            # 绘制训练 NRMSE 曲线
+            ax.plot(epochs, train_nrmse, 'b-', label='训练NRMSE', linewidth=2)
 
-            # 绘制验证损失曲线
-            if val_loss:
-                ax.plot(epochs, val_loss, 'r--', label='验证损失', linewidth=2)
+            # 绘制验证 NRMSE 曲线
+            if val_nrmse:
+                ax.plot(epochs, val_nrmse, 'r--', label='验证NRMSE', linewidth=2)
 
-                # 标注最佳验证损失点
-                min_idx = int(np.argmin(val_loss))
-                min_val = val_loss[min_idx]
+                # 标注最佳验证 NRMSE 点
+                min_idx = int(np.argmin(val_nrmse))
+                min_val = val_nrmse[min_idx]
                 ax.scatter(min_idx + 1, min_val, color='red', s=100, zorder=5, marker='*')
                 ax.annotate(f'Best: {min_val:.4f}\nEpoch {min_idx + 1}',
                            xy=(min_idx + 1, min_val),
@@ -749,7 +781,7 @@ class GPUOptimizedTrainer:
                 ax.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=10)
 
             ax.set_xlabel('Epoch', fontsize=11)
-            ax.set_ylabel('Loss (MSE)', fontsize=11)
+            ax.set_ylabel('NRMSE (%)', fontsize=11)
             ax.set_title(f'{weather_names.get(weather, weather)} 模型', fontsize=13, fontweight='bold')
             ax.legend(loc='upper right', fontsize=10)
             ax.grid(True, alpha=0.3)
@@ -760,10 +792,11 @@ class GPUOptimizedTrainer:
         plt.tight_layout()
 
         # 保存图表
-        save_path = save_dir / 'loss_curves.png'
+        save_path = save_dir / 'nrmse_curves.png'
         plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
         plt.close(fig)
-        logger.info(f"[*] Loss曲线图已保存至: {save_path}")
+        print(f"[*] NRMSE曲线图已保存至: {save_path}")
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":

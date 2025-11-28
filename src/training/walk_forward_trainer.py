@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -158,11 +159,11 @@ class WalkForwardTrainer:
             )
             self.logger.info("标签复用已启用，将跳过阈值微调。")
 
-        # 全局训练历史（跨所有fold累积）
+        # 全局训练历史（跨所有fold累积，使用 NRMSE 统一指标）
         self.global_train_history: Dict[str, Dict[str, List]] = {
             weather: {
-                'train_loss': [],
-                'val_loss': [],
+                'train_nrmse': [],
+                'val_nrmse': [],
                 'grad_last': [],
                 'grad_avg': [],
                 'grad_max': [],
@@ -173,7 +174,7 @@ class WalkForwardTrainer:
         self.fold_boundaries: List[int] = []  # 记录每个fold结束时的全局epoch编号
         self.fold_best_epochs: Dict[str, List[Dict]] = {
             weather: [] for weather in ['sunny', 'cloudy', 'overcast']
-        }  # 记录每个fold内的最佳验证epoch
+        }  # 记录每个fold内的最佳验证 NRMSE epoch
 
     def _log_weather_distribution(self, split_name: str, weather_bundle: Dict[str, np.ndarray]) -> None:
         labels = np.asarray(weather_bundle.get("labels"), dtype=np.int64)
@@ -325,7 +326,14 @@ class WalkForwardTrainer:
             training_cfg = dict(self.training_cfg)
             training_cfg["checkpoint_dir"] = str(checkpoint_dir)
 
-            trainer = GPUOptimizedTrainer(multi_model.models, training_cfg, device=str(self.device), log_dir=str(result_dir))
+            trainer = GPUOptimizedTrainer(
+                multi_model.models,
+                training_cfg,
+                device=str(self.device),
+                log_dir=str(result_dir),
+                power_scale=self.power_scale,
+                prated=self.prated_kw,
+            )
             epochs = training_cfg.get("epochs", 100)
             trainer.train_all_models(train_loaders, val_loaders, epochs=epochs)
 
@@ -916,41 +924,41 @@ class WalkForwardTrainer:
         epochs: int,
     ) -> None:
         """将单个fold的训练历史追加到全局历史"""
-        current_global_epoch = len(self.global_train_history['sunny']['train_loss'])
+        current_global_epoch = len(self.global_train_history['sunny']['train_nrmse'])
 
         for weather in ['sunny', 'cloudy', 'overcast']:
             if weather not in fold_history:
                 continue
             hist = fold_history[weather]
 
-            # 追加各指标
-            train_loss = hist.get('train_loss', [])
-            val_loss = hist.get('val_loss', [])
+            # 追加各指标（注意：trainer 现在使用 train_nrmse/val_nrmse）
+            train_nrmse = hist.get('train_nrmse', [])
+            val_nrmse = hist.get('val_nrmse', [])
             grad_last = hist.get('grad_last', [])
             grad_avg = hist.get('grad_avg', [])
             grad_max = hist.get('grad_max', [])
             lr = hist.get('lr', [])
 
-            self.global_train_history[weather]['train_loss'].extend(train_loss)
-            self.global_train_history[weather]['val_loss'].extend(val_loss)
+            self.global_train_history[weather]['train_nrmse'].extend(train_nrmse)
+            self.global_train_history[weather]['val_nrmse'].extend(val_nrmse)
             self.global_train_history[weather]['grad_last'].extend(grad_last)
             self.global_train_history[weather]['grad_avg'].extend(grad_avg)
             self.global_train_history[weather]['grad_max'].extend(grad_max)
             self.global_train_history[weather]['lr'].extend(lr)
 
-            # 记录当前fold内的最佳验证epoch（全局编号）
-            if val_loss:
-                local_best_idx = int(np.argmin(val_loss))
+            # 记录当前fold内的最佳验证 NRMSE epoch（全局编号）
+            if val_nrmse:
+                local_best_idx = int(np.argmin(val_nrmse))
                 global_best_epoch = current_global_epoch + local_best_idx + 1
                 self.fold_best_epochs[weather].append({
                     'fold_id': fold_id,
                     'global_epoch': global_best_epoch,
                     'local_epoch': local_best_idx + 1,
-                    'val_loss': val_loss[local_best_idx],
+                    'val_nrmse': val_nrmse[local_best_idx],
                 })
 
         # 记录fold边界（全局epoch编号）
-        new_total = len(self.global_train_history['sunny']['train_loss'])
+        new_total = len(self.global_train_history['sunny']['train_nrmse'])
         self.fold_boundaries.append(new_total)
         self.logger.debug("Fold %d 历史已追加，全局epoch数: %d", fold_id, new_total)
 
@@ -965,13 +973,14 @@ class WalkForwardTrainer:
             'fold_best_epochs': self.fold_best_epochs,
         }
 
-        save_path = save_dir / 'overall_loss_history.json'
+        save_path = save_dir / 'overall_nrmse_history.json'
         with open(save_path, 'w', encoding='utf-8') as f:
             json.dump(history_data, f, ensure_ascii=False, indent=2)
-        self.logger.info("[*] 全局训练历史已保存至: %s", save_path)
+        print(f"[*] 全局NRMSE历史已保存至: {save_path}")
+        sys.stdout.flush()
 
     def plot_overall_loss_curves(self, save_dir: Optional[Path] = None) -> None:
-        """绘制全局Loss曲线图（跨所有fold）"""
+        """绘制全局 NRMSE 曲线图（跨所有fold）"""
         save_dir = save_dir or self.base_result_dir
         save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -990,24 +999,24 @@ class WalkForwardTrainer:
 
         for ax, weather in zip(axes, weathers):
             history = self.global_train_history.get(weather, {})
-            train_loss = history.get('train_loss', [])
-            val_loss = history.get('val_loss', [])
+            train_nrmse = history.get('train_nrmse', [])
+            val_nrmse = history.get('val_nrmse', [])
             grad_last = history.get('grad_last', [])
 
-            if not train_loss:
+            if not train_nrmse:
                 ax.text(0.5, 0.5, '无数据', ha='center', va='center', fontsize=14)
                 ax.set_title(f'{weather_names.get(weather, weather)} 模型', fontsize=13, fontweight='bold')
                 continue
 
-            total_epochs = len(train_loss)
+            total_epochs = len(train_nrmse)
             epochs_range = range(1, total_epochs + 1)
 
-            # 绘制训练损失曲线
-            ax.plot(epochs_range, train_loss, 'b-', label='训练损失', linewidth=1.5, alpha=0.8)
+            # 绘制训练 NRMSE 曲线
+            ax.plot(epochs_range, train_nrmse, 'b-', label='训练NRMSE', linewidth=1.5, alpha=0.8)
 
-            # 绘制验证损失曲线
-            if val_loss:
-                ax.plot(epochs_range, val_loss, 'r--', label='验证损失', linewidth=1.5, alpha=0.8)
+            # 绘制验证 NRMSE 曲线
+            if val_nrmse:
+                ax.plot(epochs_range, val_nrmse, 'r--', label='验证NRMSE', linewidth=1.5, alpha=0.8)
 
             # 绘制fold边界（垂直虚线）和fold标签
             for i, boundary in enumerate(self.fold_boundaries):
@@ -1016,18 +1025,18 @@ class WalkForwardTrainer:
                 # 在fold中间位置添加标签
                 start = self.fold_boundaries[i - 1] if i > 0 else 0
                 mid = (start + boundary) / 2
-                y_pos = ax.get_ylim()[1] * 0.95 if ax.get_ylim()[1] > 0 else max(train_loss) * 0.95
+                y_pos = ax.get_ylim()[1] * 0.95 if ax.get_ylim()[1] > 0 else max(train_nrmse) * 0.95
                 ax.text(mid, y_pos, f'Fold {i + 1}', ha='center', va='top', fontsize=9, color='dimgray', alpha=0.8)
 
-            # 标注每个fold的最佳验证点
+            # 标注每个fold的最佳验证 NRMSE 点
             best_epochs_info = self.fold_best_epochs.get(weather, [])
             for info in best_epochs_info:
                 epoch = info['global_epoch']
-                loss_val = info['val_loss']
-                ax.scatter(epoch, loss_val, color='red', s=80, zorder=5, marker='*')
+                nrmse_val = info['val_nrmse']
+                ax.scatter(epoch, nrmse_val, color='red', s=80, zorder=5, marker='*')
                 ax.annotate(
-                    f"F{info['fold_id']}:{loss_val:.4f}",
-                    xy=(epoch, loss_val),
+                    f"F{info['fold_id']}:{nrmse_val:.4f}",
+                    xy=(epoch, nrmse_val),
                     xytext=(5, 8), textcoords='offset points',
                     fontsize=8, color='red',
                     bbox=dict(boxstyle='round,pad=0.2', facecolor='yellow', alpha=0.6)
@@ -1060,17 +1069,18 @@ class WalkForwardTrainer:
                 ax.legend(loc='upper right', fontsize=9)
 
             ax.set_xlabel('Epoch (全局)', fontsize=11)
-            ax.set_ylabel('Loss (MSE)', fontsize=11)
+            ax.set_ylabel('NRMSE (%)', fontsize=11)
             ax.set_title(f'{weather_names.get(weather, weather)} 模型', fontsize=13, fontweight='bold')
             ax.grid(True, alpha=0.3)
             ax.set_ylim(bottom=0)
             ax.set_xlim(left=1, right=total_epochs)
 
-        plt.suptitle('Walk-Forward 全局训练曲线', fontsize=14, fontweight='bold', y=1.02)
+        plt.suptitle('Walk-Forward 全局 NRMSE 曲线', fontsize=14, fontweight='bold', y=1.02)
         plt.tight_layout()
 
         # 保存图表
-        save_path = save_dir / 'overall_loss_curves.png'
+        save_path = save_dir / 'overall_nrmse_curves.png'
         plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
         plt.close(fig)
-        self.logger.info("[*] 全局Loss曲线图已保存至: %s", save_path)
+        print(f"[*] 全局NRMSE曲线图已保存至: {save_path}")
+        sys.stdout.flush()
