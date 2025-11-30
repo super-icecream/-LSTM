@@ -1,0 +1,25 @@
+﻿# 数据文件
+datas/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+*.egg
+
+# 虚拟环境
+.conda/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# 实验输出
+experiments/runs/
+diagnostics/
+
+# 日志
+*.log
