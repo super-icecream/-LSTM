@@ -1,0 +1,45 @@
+{
+  "cluster_info": {
+    "cluster_to_weather": {
+      "2": 0,
+      "0": 1,
+      "1": 2
+    },
+    "counts": {
+      "sunny": 3576,
+      "cloudy": 2251,
+      "overcast": 2028
+    },
+    "silhouette": 0.3539593791699565
+  },
+  "ci": {
+    "low_boundary": {
+      "value": 0.21887130020280218,
+      "method": "gaussian",
+      "band_p10": null,
+      "band_p90": null
+    },
+    "high_boundary": {
+      "value": 0.3010186590633337,
+      "method": "gaussian",
+      "band_p10": null,
+      "band_p90": null
+    }
+  },
+  "wsi": {
+    "low_boundary": {
+      "value": 0.7481472150252335,
+      "method": "gaussian",
+      "band_p10": null,
+      "band_p90": null
+    },
+    "high_boundary": {
+      "value": 0.6967016590053103,
+      "method": "gaussian",
+      "band_p10": null,
+      "band_p90": null
+    }
+  },
+  "gmm": null,
+  "notes": "Use thresholds.ci.* and thresholds.wsi.* to populate feature_engineering in config.yaml."
+}

@@ -43,6 +43,10 @@ from ..utils.cluster_labels import (
     load_cluster_label_bundle,
     assign_cluster_labels,
 )
+from ..utils.weather_lgb_classifier import (
+    WeatherLGBClassifier,
+    compute_clustering_features,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -139,6 +143,7 @@ class WalkForwardTrainer:
         self.reuse_label_bundle_combined: Optional[ClusterLabelBundle] = None
         self.reuse_label_fallback = str(reuse_cfg.get("fallback", "classify")).lower()
         self.reuse_label_min_coverage = float(reuse_cfg.get("min_coverage", 0.95))
+        self.use_combined_only = bool(reuse_cfg.get("use_combined_only", False))
         if self.reuse_labels_enabled:
             split_cfgs = reuse_cfg.get("splits", {})
             for split_name, cfg in split_cfgs.items():
@@ -153,11 +158,31 @@ class WalkForwardTrainer:
                 )
             if self.reuse_label_fallback not in {"classify"}:
                 raise ValueError("reuse_cluster_labels.fallback only supports 'classify'")
-            self.logger.info(
-                "Walk-Forward 标签复用已启用，可用标签来源: %s",
-                {k: v.source for k, v in self.reuse_label_bundles.items()},
-            )
+            if self.use_combined_only:
+                self.logger.info(
+                    "Walk-Forward 标签复用已启用 (use_combined_only=true)，直接使用合并标签覆盖所有fold"
+                )
+            else:
+                self.logger.info(
+                    "Walk-Forward 标签复用已启用，可用标签来源: %s",
+                    {k: v.source for k, v in self.reuse_label_bundles.items()},
+                )
             self.logger.info("标签复用已启用，将跳过阈值微调。")
+        
+        # Load LightGBM weather classifier for test-time inference
+        self.weather_lgb_classifier: Optional[WeatherLGBClassifier] = None
+        lgb_cfg = fe_cfg.get("weather_lgb_classifier", {})
+        lgb_model_dir = lgb_cfg.get("model_dir")
+        if lgb_model_dir:
+            try:
+                lgb_model_path = Path(lgb_model_dir)
+                if lgb_model_path.exists() and (lgb_model_path / "weather_lgb_model.txt").exists():
+                    self.weather_lgb_classifier = WeatherLGBClassifier.from_directory(lgb_model_path)
+                    self.logger.info("已加载 LightGBM 天气分类器: %s", lgb_model_path)
+                else:
+                    self.logger.warning("LightGBM 模型目录不存在或缺少模型文件: %s", lgb_model_dir)
+            except Exception as e:
+                self.logger.warning("加载 LightGBM 天气分类器失败: %s", e)
 
         # 全局训练历史（跨所有fold累积，使用 NRMSE 统一指标）
         self.global_train_history: Dict[str, Dict[str, List]] = {
@@ -176,7 +201,15 @@ class WalkForwardTrainer:
             weather: [] for weather in ['sunny', 'cloudy', 'overcast']
         }  # 记录每个fold内的最佳验证 NRMSE epoch
 
-    def _log_weather_distribution(self, split_name: str, weather_bundle: Dict[str, np.ndarray]) -> None:
+    def _log_weather_distribution(self, split_name: str, weather_bundle: Dict[str, np.ndarray], source: str = "unknown") -> None:
+        """
+        打印天气分布统计，明确标注来源。
+        
+        Args:
+            split_name: 数据集名称 (如 fold1-train)
+            weather_bundle: 天气分类结果字典
+            source: 标签来源，可选值: "聚类", "LightGBM", "CI/WSI阈值"
+        """
         labels = np.asarray(weather_bundle.get("labels"), dtype=np.int64)
         dist = {self.weather_map[idx]: int(np.sum(labels == idx)) for idx in self.weather_map}
         mask_src = weather_bundle.get("day_mask")
@@ -189,7 +222,7 @@ class WalkForwardTrainer:
         day_total = max(int(day_labels.size), 1)
         dist_percent = {name: (dist[name] / day_total * 100.0) if day_total else 0.0 for name in dist}
         parts = [f"{name}={dist[name]} ({dist_percent[name]:.1f}%)" for name in dist]
-        self.logger.info("天气分布(%s): %s, 夜间样本数=%d", split_name, ", ".join(parts), night_count)
+        self.logger.info("天气分布[%s](%s): %s, 夜间样本数=%d", source, split_name, ", ".join(parts), night_count)
 
     def _apply_cluster_labels_if_needed(
         self,
@@ -199,12 +232,17 @@ class WalkForwardTrainer:
     ) -> Dict[str, np.ndarray]:
         reuse_bundle = None
         if self.reuse_labels_enabled:
-            canonical = split_name.split("-")[-1].lower()
-            reuse_bundle = self.reuse_label_bundles.get(canonical)
-            if reuse_bundle is None:
+            if self.use_combined_only:
+                # 直接使用合并标签，跳过单独split匹配
                 reuse_bundle = self.reuse_label_bundle_combined
+                self.logger.debug("使用合并标签 (use_combined_only=true)")
+            else:
+                canonical = split_name.split("-")[-1].lower()
+                reuse_bundle = self.reuse_label_bundles.get(canonical)
+                if reuse_bundle is None:
+                    reuse_bundle = self.reuse_label_bundle_combined
         if not self.reuse_labels_enabled or reuse_bundle is None:
-            self._log_weather_distribution(split_name, weather_bundle)
+            self._log_weather_distribution(split_name, weather_bundle, source="CI/WSI阈值")
             return weather_bundle
         mask_src = weather_bundle.get("day_mask")
         day_mask_local = (
@@ -257,13 +295,125 @@ class WalkForwardTrainer:
             and cov_day < float(self.reuse_label_min_coverage)
         ):
             self.logger.warning(
-                "聚类标签[%s] 的白天覆盖率 %.3f 低于告警阈值 %.3f",
+                "聚类标签[%s] 的白天覆盖率 %.3f 低于告警阈值 %.3f，回退到CI/WSI阈值分类",
                 split_name,
                 cov_day,
                 self.reuse_label_min_coverage,
             )
-        self._log_weather_distribution(split_name, weather_bundle)
+        # 根据覆盖率决定标注来源
+        actual_coverage = stats.get("day_coverage", 0)
+        if np.isfinite(actual_coverage) and actual_coverage >= 0.5:
+            source = "聚类"
+        else:
+            source = "CI/WSI阈值(聚类覆盖率低)"
+        self._log_weather_distribution(split_name, weather_bundle, source=source)
         return weather_bundle
+
+    def _classify_test_weather_lgb(
+        self,
+        test_df: pd.DataFrame,
+        test_weather: Dict[str, np.ndarray],
+        fold: Dict,
+        daytime_mode: str,
+        ge_min: float,
+        ghi_min: float,
+    ) -> Dict[str, np.ndarray]:
+        """
+        Classify test set weather using LightGBM classifier if available.
+        
+        This method ensures no data leakage by using a pre-trained LightGBM
+        classifier instead of true weather labels for test-time model selection.
+        
+        Args:
+            test_df: Test DataFrame
+            test_weather: Weather bundle from CI/WSI threshold classification (fallback)
+            fold: Fold information dict
+            daytime_mode: Daytime detection mode
+            ge_min: GE threshold for daytime
+            ghi_min: GHI threshold for daytime
+        
+        Returns:
+            Updated weather bundle with LightGBM predictions (if available)
+        """
+        if self.weather_lgb_classifier is None:
+            self.logger.info(
+                "fold%d-test: LightGBM 分类器未加载, 使用 CI/WSI 阈值分类",
+                fold["id"],
+            )
+            test_weather["label_source"] = "CI/WSI阈值"
+            return test_weather
+        
+        try:
+            # Get metadata from LightGBM classifier
+            meta = self.weather_lgb_classifier.meta or {}
+            feature_cols = meta.get("feature_cols", [])
+            window_mins = int(meta.get("window_mins", 60))
+            min_samples_per_window = int(meta.get("min_samples_per_window", 3))
+            freq_minutes = int(self.config.get("data", {}).get("frequency_minutes", 15))
+            
+            if not feature_cols:
+                self.logger.warning(
+                    "fold%d-test: LightGBM 元数据缺少 feature_cols, 回退到 CI/WSI 分类",
+                    fold["id"],
+                )
+                test_weather["label_source"] = "CI/WSI阈值"
+                return test_weather
+            
+            # Compute clustering features for test data
+            X_test, valid_idx = compute_clustering_features(
+                test_df,
+                window_mins=window_mins,
+                min_samples_per_window=min_samples_per_window,
+                freq_minutes=freq_minutes,
+                feature_cols=feature_cols,
+                features_basic_only=meta.get("features_basic_only", False),
+            )
+            
+            if X_test.shape[0] == 0:
+                self.logger.warning(
+                    "fold%d-test: 计算聚类特征后无有效样本, 回退到 CI/WSI 分类",
+                    fold["id"],
+                )
+                test_weather["label_source"] = "CI/WSI阈值"
+                return test_weather
+            
+            # Predict weather labels using LightGBM
+            lgb_labels = self.weather_lgb_classifier.predict(X_test)
+            
+            # Map predictions back to full test index
+            original_labels = np.asarray(test_weather.get("labels"), dtype=np.int64)
+            day_mask = np.asarray(test_weather.get("day_mask"), dtype=bool)
+            
+            # Create mapping from valid_idx to original index positions
+            idx_to_pos = {ts: i for i, ts in enumerate(test_df.index)}
+            
+            lgb_count = 0
+            for i, ts in enumerate(valid_idx):
+                pos = idx_to_pos.get(ts)
+                if pos is not None and day_mask[pos]:
+                    original_labels[pos] = lgb_labels[i]
+                    lgb_count += 1
+            
+            test_weather["labels"] = original_labels
+            test_weather["lgb_classified_count"] = lgb_count
+            test_weather["label_source"] = "LightGBM"
+            
+            self.logger.info(
+                "fold%d-test: LightGBM 分类完成, 分类样本数=%d/%d",
+                fold["id"],
+                lgb_count,
+                int(day_mask.sum()),
+            )
+            
+        except Exception as e:
+            self.logger.warning(
+                "fold%d-test: LightGBM 分类失败 (%s), 回退到 CI/WSI 分类",
+                fold["id"],
+                str(e),
+            )
+            test_weather["label_source"] = "CI/WSI阈值"
+        
+        return test_weather
 
     def train_all_folds(self, folds: List[Dict]) -> Dict[str, Any]:
         self.base_artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -446,7 +596,8 @@ class WalkForwardTrainer:
             method=norm_cfg.get("method", "minmax"),
             feature_range=tuple(norm_cfg.get("feature_range", [0, 1])),
         )
-        preprocessor.fit(train_df)
+        # 不归一化功率列（power/power_mw），因为目标值应保持原始尺度
+        preprocessor.fit(train_df, exclude_columns=["power", "power_mw"])
         train_proc = preprocessor.transform(train_df)
         val_proc = preprocessor.transform(val_df)
         test_proc = preprocessor.transform(test_df)
@@ -457,6 +608,24 @@ class WalkForwardTrainer:
         fe_cfg = self.config.get("feature_engineering", {})
         daytime_cfg = fe_cfg.get("daytime", {})
         loc_cfg = self.config.get("data", {}).get("location", {}) or {}
+
+        # 如果启用了复用聚类标签，优先使用聚类阶段的白天参数以保证一致性
+        if self.reuse_labels_enabled and self.reuse_label_bundles:
+            # 从任一 bundle 的 meta 中读取聚类阶段的白天参数
+            first_bundle = next(iter(self.reuse_label_bundles.values()))
+            cluster_meta = first_bundle.meta or {}
+            used_daytime_mode = str(cluster_meta.get("daytime_mode", daytime_cfg.get("mode", "ghi"))).lower()
+            used_ge_min = float(cluster_meta.get("daytime_ge_min", daytime_cfg.get("ge_min_wm2", 20.0)))
+            used_ghi_min = float(cluster_meta.get("daytime_ghi_min", daytime_cfg.get("ghi_min_wm2", 5.0)))
+            self.logger.info(
+                "复用聚类阶段白天参数: mode=%s, ge_min=%.2f, ghi_min=%.2f",
+                used_daytime_mode, used_ge_min, used_ghi_min,
+            )
+        else:
+            used_daytime_mode = str(daytime_cfg.get("mode", "ghi")).lower()
+            used_ge_min = float(daytime_cfg.get("ge_min_wm2", 20.0))
+            used_ghi_min = float(daytime_cfg.get("ghi_min_wm2", 5.0))
+
         weather_classifier = WeatherClassifier(
             location_lat=float(loc_cfg.get("lat", 38.5)),
             location_lon=float(loc_cfg.get("lon", 105.0)),
@@ -465,17 +634,26 @@ class WalkForwardTrainer:
             ci_thresholds=fe_cfg.get("ci_thresholds", [0.2, 0.6]),
             wsi_thresholds=fe_cfg.get("wsi_thresholds", [0.3, 0.7]),
             fusion_weights=fe_cfg.get("fusion_weights", {"ci": 0.7, "wsi": 0.3}),
-            daytime_ge_min=daytime_cfg.get("ge_min_wm2", 20.0),
-            daytime_mode=str(daytime_cfg.get("mode", "ghi")).lower(),
-            daytime_ghi_min=float(daytime_cfg.get("ghi_min_wm2", 5.0)),
+            daytime_ge_min=used_ge_min,
+            daytime_mode=used_daytime_mode,
+            daytime_ghi_min=used_ghi_min,
             night_handling=daytime_cfg.get("night_handling", "exclude"),
         )
-        train_weather = weather_classifier.classify(train_df)
-        val_weather = weather_classifier.classify(val_df)
-        test_weather = weather_classifier.classify(test_df)
+        # 当启用聚类标签时，CI/WSI分类仅用于获取day_mask，不输出分布日志
+        silent_classify = self.reuse_labels_enabled
+        train_weather = weather_classifier.classify(train_df, silent=silent_classify)
+        val_weather = weather_classifier.classify(val_df, silent=silent_classify)
+        test_weather = weather_classifier.classify(test_df, silent=silent_classify)
+        # 训练集和验证集可以使用聚类标签（用于训练子模型）
         train_weather = self._apply_cluster_labels_if_needed(train_df, train_weather, f"fold{fold['id']}-train")
         val_weather = self._apply_cluster_labels_if_needed(val_df, val_weather, f"fold{fold['id']}-val")
-        test_weather = self._apply_cluster_labels_if_needed(test_df, test_weather, f"fold{fold['id']}-test")
+        # 测试集使用 LightGBM 分类器进行实时天气分类（如果可用）
+        test_weather = self._classify_test_weather_lgb(
+            test_df, test_weather, fold, used_daytime_mode, used_ge_min, used_ghi_min
+        )
+        # 根据 test_weather 中的来源标记决定显示
+        test_source = test_weather.get("label_source", "LightGBM" if self.weather_lgb_classifier else "CI/WSI阈值")
+        self._log_weather_distribution(f"fold{fold['id']}-test", test_weather, source=test_source)
         def _extract_day_mask(bundle: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
             mask = bundle.get("day_mask")
             return np.asarray(mask, dtype=bool) if mask is not None else None
@@ -573,9 +751,17 @@ class WalkForwardTrainer:
         )
         dlfe.save_mapping(artifact_dir / "dlfe_mapping.pkl")
 
-        def build_feature_set(features: np.ndarray, processed_df: Any, weather_bundle: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        def build_feature_set(
+            features: np.ndarray,
+            original_df: Any,
+            weather_bundle: Dict[str, np.ndarray],
+            prated_kw: float,
+        ) -> Dict[str, np.ndarray]:
             feature_array = _sanitize_array(features)
-            target_array = _sanitize_array(processed_df["power"].values.astype(np.float32))
+            # 使用原始功率值，按额定功率归一化（物理意义上的0-1）
+            # 这样梯度会更大，训练更有效
+            raw_power = original_df["power"].values.astype(np.float32)
+            target_array = _sanitize_array(raw_power / prated_kw)  # 归一化到 [0, 1] 但基于额定功率
             weather_array = np.asarray(weather_bundle["labels"], dtype=np.int64)
             day_mask_array = np.asarray(
                 weather_bundle.get("day_mask", np.ones_like(weather_array, dtype=bool)),
@@ -592,9 +778,9 @@ class WalkForwardTrainer:
             }
 
         return {
-            "train": build_feature_set(train_dlfe, train_proc, train_weather),
-            "val": build_feature_set(val_dlfe, val_proc, val_weather),
-            "test": build_feature_set(test_dlfe, test_proc, test_weather),
+            "train": build_feature_set(train_dlfe, train_df, train_weather, self.prated_kw),
+            "val": build_feature_set(val_dlfe, val_df, val_weather, self.prated_kw),
+            "test": build_feature_set(test_dlfe, test_df, test_weather, self.prated_kw),
         }
 
     def _load_best_checkpoints(self, multi_model: MultiWeatherModel, checkpoint_dir: Path) -> None:

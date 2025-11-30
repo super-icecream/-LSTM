@@ -385,7 +385,8 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
         method=norm_cfg.get("method", "minmax"),
         feature_range=tuple(norm_cfg.get("feature_range", [0, 1])),
     )
-    preprocessor.fit(train_df)
+    # 不归一化功率列（power/power_mw），因为目标值应保持原始尺度
+    preprocessor.fit(train_df, exclude_columns=["power", "power_mw"])
     train_proc = preprocessor.transform(train_df)
     val_proc = preprocessor.transform(val_df)
     test_proc = preprocessor.transform(test_df)
@@ -655,9 +656,16 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
     )
     dlfe.save_mapping(paths.artifacts / "dlfe_mapping.pkl")
 
-    def build_feature_set(features: np.ndarray, processed: pd.DataFrame, weather_bundle: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    def build_feature_set(
+        features: np.ndarray,
+        original_df: pd.DataFrame,
+        weather_bundle: Dict[str, np.ndarray],
+        prated: float,
+    ) -> Dict[str, np.ndarray]:
         feature_array = sanitize_feature_array(features)
-        target_array = sanitize_feature_array(processed["power"].values.astype(np.float32))
+        # 使用原始功率值，按额定功率归一化（物理意义上的0-1）
+        raw_power = original_df["power"].values.astype(np.float32)
+        target_array = sanitize_feature_array(raw_power / prated)
         weather_array = np.asarray(weather_bundle["labels"], dtype=np.int64)
         day_mask_array = np.asarray(weather_bundle.get("day_mask", np.ones_like(weather_array, dtype=bool)), dtype=bool)
         feature_array, target_array, weather_array, day_mask_array = align_length(
@@ -671,9 +679,9 @@ def run_feature_pipeline(config: Dict, paths: PipelinePaths, logger, force_rebui
         }
 
     feature_sets = {
-        "train": build_feature_set(train_dlfe, train_proc, train_weather),
-        "val": build_feature_set(val_dlfe, val_proc, val_weather),
-        "test": build_feature_set(test_dlfe, test_proc, test_weather),
+        "train": build_feature_set(train_dlfe, train_df, train_weather, prated_kw),
+        "val": build_feature_set(val_dlfe, val_df, val_weather, prated_kw),
+        "test": build_feature_set(test_dlfe, test_df, test_weather, prated_kw),
     }
 
     logger.info("特征工程流水线执行完成：train=%d, val=%d, test=%d", *[feature_sets[split]["features"].shape[0] for split in ("train", "val", "test")])

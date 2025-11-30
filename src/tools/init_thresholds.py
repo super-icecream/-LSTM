@@ -25,6 +25,7 @@ import pandas as pd
 import yaml
 import sys
 import time
+import pickle
 
 # Optional deps
 try:
@@ -48,6 +49,12 @@ try:
 except Exception:
     _HAVE_TORCH = False
     _CUDA_OK = False
+
+try:
+    import lightgbm as lgb  # type: ignore
+    _HAVE_LIGHTGBM = True
+except Exception:
+    _HAVE_LIGHTGBM = False
 
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -228,12 +235,16 @@ def engineer_features(df: pd.DataFrame,
                       feat_weight_tod: float = 2.0,
                       feat_weight_diffuse: float = 2.0,
                       feat_weight_z: float = 1.5,
-                      features_basic_only: bool = False) -> Tuple[np.ndarray, Dict]:
+                      features_basic_only: bool = False,
+                      return_transforms: bool = False) -> Tuple[np.ndarray, Dict]:
     """
     Build clustering features excluding CI/WSI.
     GPU acceleration:
       - If torch.cuda is available, rolling mean/std/diff computed on GPU using cumsum
       - Otherwise fall back to pandas.rolling
+    
+    Args:
+        return_transforms: If True, meta will include 'scaler' and 'pca' objects for later reuse.
     """
     df = df.copy()
     required = ["power", "irradiance", "temperature", "pressure", "humidity"]
@@ -416,14 +427,17 @@ def engineer_features(df: pd.DataFrame,
         raise ValueError("窗口统计后无有效样本，请调整 --window-mins 或 --min-samples-per-window")
     X = df_feat[feature_cols].values.astype(float)
 
+    scaler_obj = None
     if _HAVE_SKLEARN:
-        scaler = StandardScaler() if scaler_name == "standard" else RobustScaler()
-        Xs = scaler.fit_transform(X)
+        scaler_obj = StandardScaler() if scaler_name == "standard" else RobustScaler()
+        Xs = scaler_obj.fit_transform(X)
     else:
         med = np.nanmedian(X, axis=0)
         iqr = np.nanpercentile(X, 75, axis=0) - np.nanpercentile(X, 25, axis=0)
         iqr[iqr == 0] = 1.0
         Xs = (X - med) / iqr
+        # Store NumPy fallback params for later use
+        scaler_obj = {"type": "numpy_fallback", "median": med.tolist(), "iqr": iqr.tolist()}
 
     # Post-scaling feature weighting: emphasize time-of-day, diffuse ratio, and robust z-scores
     weights = np.ones(len(feature_cols), dtype=float)
@@ -439,7 +453,13 @@ def engineer_features(df: pd.DataFrame,
     Xs = Xs * weights[np.newaxis, :]
 
     meta = {"feature_cols": feature_cols, "steps": steps, "index": df_feat.index, "weights": weights.tolist()}
+    
+    # Store scaler if requested
+    if return_transforms:
+        meta["scaler"] = scaler_obj
+    
     # PCA: prefer GPU (torch) if available; else sklearn; else NumPy SVD
+    pca_obj = None
     if use_pca and pca_n > 0:
         n_comp = int(max(1, min(pca_n, Xs.shape[1] - 1)))
         if _HAVE_TORCH and _CUDA_OK:
@@ -470,17 +490,26 @@ def engineer_features(df: pd.DataFrame,
             evr_sum = (var_explained.sum() / torch.clamp(total_var, min=1e-9)).item()
             Xs = X_proj
             meta["pca_explained_var"] = float(evr_sum)
+            # Store GPU PCA params for later use (as numpy arrays)
+            if return_transforms:
+                pca_obj = {
+                    "type": "gpu_pca",
+                    "mean": mean.detach().cpu().numpy().flatten().tolist(),
+                    "components": comps.detach().cpu().numpy().tolist(),
+                    "n_components": n_comp,
+                }
             # Release GPU memory
             del Xt, Xc, U, S, V, comps
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
         elif _HAVE_SKLEARN:
-            pca = PCA(n_components=n_comp, random_state=42)
-            Xs = pca.fit_transform(Xs)
-            meta["pca_explained_var"] = float(np.sum(pca.explained_variance_ratio_))
+            pca_obj = PCA(n_components=n_comp, random_state=42)
+            Xs = pca_obj.fit_transform(Xs)
+            meta["pca_explained_var"] = float(np.sum(pca_obj.explained_variance_ratio_))
         else:
             # NumPy SVD fallback on CPU
             Xc = Xs - Xs.mean(axis=0, keepdims=True)
+            pca_mean = Xs.mean(axis=0)
             U, s, Vt = np.linalg.svd(Xc, full_matrices=False)
             comps = Vt[:n_comp].T  # (d, n_comp)
             Xs = Xc @ comps
@@ -488,6 +517,16 @@ def engineer_features(df: pd.DataFrame,
             var_explained = (s[:n_comp] ** 2) / max(n_samples - 1, 1)
             total_var = Xc.var(axis=0, ddof=1).sum()
             meta["pca_explained_var"] = float((var_explained.sum() / max(total_var, 1e-9)))
+            if return_transforms:
+                pca_obj = {
+                    "type": "numpy_pca",
+                    "mean": pca_mean.tolist(),
+                    "components": comps.tolist(),
+                    "n_components": n_comp,
+                }
+        if return_transforms and pca_obj is not None:
+            meta["pca"] = pca_obj
+    
     return Xs, meta
 
 
@@ -875,6 +914,41 @@ def plot_diagnostics(output_dir: Path,
 
 def main():
     prog = OneLineProgress()
+    
+    # First pass: parse only --config to load defaults from config file
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG))
+    pre_args, _ = pre_parser.parse_known_args()
+    
+    # Load config to get clustering defaults
+    try:
+        config_for_defaults = load_yaml(Path(pre_args.config))
+        fe_cfg = config_for_defaults.get("feature_engineering", {})
+        cluster_cfg = fe_cfg.get("clustering", {})
+    except Exception:
+        cluster_cfg = {}
+    
+    # Extract defaults from config
+    def_daytime_mode = cluster_cfg.get("daytime_mode", "ghi")
+    def_daytime_ghi_min = float(cluster_cfg.get("daytime_ghi_min", 5.0))
+    def_daytime_ge_min = float(cluster_cfg.get("daytime_ge_min", 20.0))
+    def_features_basic_only = bool(cluster_cfg.get("features_basic_only", False))
+    def_window_mins = int(cluster_cfg.get("window_mins", 60))
+    def_min_samples_per_window = int(cluster_cfg.get("min_samples_per_window", 3))
+    def_scaler = str(cluster_cfg.get("scaler", "robust"))
+    def_use_pca = bool(cluster_cfg.get("use_pca", False))
+    def_pca_n = int(cluster_cfg.get("pca_n", 10))
+    def_feat_weight_tod = float(cluster_cfg.get("feat_weight_tod", 2.0))
+    def_feat_weight_diffuse = float(cluster_cfg.get("feat_weight_diffuse", 2.0))
+    def_feat_weight_z = float(cluster_cfg.get("feat_weight_z", 1.5))
+    def_learn_prototypes = bool(cluster_cfg.get("learn_prototypes", False))
+    def_proto_sunny = cluster_cfg.get("proto_sunny")
+    def_proto_cloudy = cluster_cfg.get("proto_cloudy")
+    def_proto_overcast = cluster_cfg.get("proto_overcast")
+    def_prototypes_min_count = int(cluster_cfg.get("prototypes_min_count", 30))
+    def_proto_tol_mins = int(cluster_cfg.get("prototypes_tol_mins", 8))
+    
+    # Main parser with config-based defaults
     parser = argparse.ArgumentParser(description="Initialize CI/WSI thresholds (GPU-accelerated where possible)")
     parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG))
     parser.add_argument("--split", type=str, default="train", choices=["train", "val", "test"])
@@ -882,12 +956,12 @@ def main():
     parser.add_argument("--end-date", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=str, default=None)
-    # Features/Clustering
-    parser.add_argument("--window-mins", type=int, default=60)
-    parser.add_argument("--min-samples-per-window", type=int, default=3)
-    parser.add_argument("--scaler", type=str, default="robust", choices=["robust", "standard"])
-    parser.add_argument("--use-pca", action="store_true")
-    parser.add_argument("--pca-n", type=int, default=3)
+    # Features/Clustering (defaults from config.feature_engineering.clustering)
+    parser.add_argument("--window-mins", type=int, default=def_window_mins)
+    parser.add_argument("--min-samples-per-window", type=int, default=def_min_samples_per_window)
+    parser.add_argument("--scaler", type=str, default=def_scaler, choices=["robust", "standard"])
+    parser.add_argument("--use-pca", action="store_true", default=def_use_pca)
+    parser.add_argument("--pca-n", type=int, default=def_pca_n)
     parser.add_argument("--kmeans-n-init", type=int, default=20)
     parser.add_argument("--kmeans-max-iter", type=int, default=300)
     parser.add_argument("--kmeans-anchors", action="store_true",
@@ -898,17 +972,17 @@ def main():
                         help="High quantile for sunny-like thresholds (0-1)")
     parser.add_argument("--anchor-q-low", type=float, default=0.30,
                         help="Low quantile for overcast-like thresholds (0-1)")
-    # Prototype learning from user-provided typical days
-    parser.add_argument("--learn-prototypes", action="store_true",
+    # Prototype learning from user-provided typical days (defaults from config)
+    parser.add_argument("--learn-prototypes", action="store_true", default=def_learn_prototypes,
                         help="Learn KMeans initial centers (prototypes) from user-provided typical-day files")
-    parser.add_argument("--proto-sunny", type=str, default=None, help="Excel/CSV file containing timestamps for SUNNY samples")
-    parser.add_argument("--proto-cloudy", type=str, default=None, help="Excel/CSV file containing timestamps for CLOUDY samples")
-    parser.add_argument("--proto-overcast", type=str, default=None, help="Excel/CSV file containing timestamps for OVERCAST samples")
+    parser.add_argument("--proto-sunny", type=str, default=def_proto_sunny, help="Excel/CSV file containing timestamps for SUNNY samples")
+    parser.add_argument("--proto-cloudy", type=str, default=def_proto_cloudy, help="Excel/CSV file containing timestamps for CLOUDY samples")
+    parser.add_argument("--proto-overcast", type=str, default=def_proto_overcast, help="Excel/CSV file containing timestamps for OVERCAST samples")
     parser.add_argument("--prototypes-out", type=str, default=None, help="Path to save learned prototypes profile (YAML)")
     parser.add_argument("--use-prototypes", type=str, default=None, help="Path to load prototypes profile (YAML) and use as KMeans init")
-    parser.add_argument("--proto-tolerance-mins", type=int, default=8,
+    parser.add_argument("--proto-tolerance-mins", type=int, default=def_proto_tol_mins,
                         help="Tolerance (minutes) for aligning typical timestamps to dataset index")
-    parser.add_argument("--prototypes-min-count", type=int, default=30,
+    parser.add_argument("--prototypes-min-count", type=int, default=def_prototypes_min_count,
                         help="Minimum samples required per class to compute a reliable prototype")
     # Teacher days: user-provided typical days to derive initial centers directly
     parser.add_argument("--teach-sunny", type=str, default=None,
@@ -919,26 +993,26 @@ def main():
                         help="Comma-separated dates/ranges for typical overcast days")
     parser.add_argument("--teach-min-samples", type=int, default=50,
                         help="Minimum samples per taught class to build centers; else fallback to anchors/vanilla")
-    # Feature weighting (post-scaling)
-    parser.add_argument("--features-basic-only", action="store_true",
+    # Feature weighting (defaults from config)
+    parser.add_argument("--features-basic-only", action="store_true", default=def_features_basic_only,
                         help="Use only basic fields for clustering (Time-of-day, power, irradiance, dni(if any), irradiance_total(if any), temperature, pressure, humidity). Disable rolling/z-scores.")
-    parser.add_argument("--feat-weight-tod", type=float, default=2.0,
+    parser.add_argument("--feat-weight-tod", type=float, default=def_feat_weight_tod,
                         help="Weight for time-of-day features (tod_sin/tod_cos) after scaling")
-    parser.add_argument("--feat-weight-diffuse", type=float, default=2.0,
+    parser.add_argument("--feat-weight-diffuse", type=float, default=def_feat_weight_diffuse,
                         help="Weight for diffuse-related feature (dni_over_ghi) after scaling")
-    parser.add_argument("--feat-weight-z", type=float, default=1.5,
+    parser.add_argument("--feat-weight-z", type=float, default=def_feat_weight_z,
                         help="Weight for robust z-score features (z_*) after scaling")
     # GMM diagnostics (optional)
     parser.add_argument("--gmm-enable", action="store_true")
     parser.add_argument("--gmm-cov-type", type=str, default="auto", choices=["auto", "full", "diag", "tied", "spherical"])
     parser.add_argument("--gmm-max-iter", type=int, default=500)
-    # Daytime mask override
-    parser.add_argument("--daytime-ge-min", type=float, default=None,
+    # Daytime mask override (defaults from config)
+    parser.add_argument("--daytime-ge-min", type=float, default=def_daytime_ge_min,
                         help="Override feature_engineering.daytime.ge_min_wm2; e.g., 0 keeps all as daytime")
-    parser.add_argument("--daytime-mode", type=str, default=None, choices=["ge", "ghi", "or", "and"],
-                        help="Daytime mask mode: ge|ghi|or|and; default from config.daytime.mode (recommend 'ghi')")
-    parser.add_argument("--daytime-ghi-min", type=float, default=None,
-                        help="Override daytime GHI threshold (W/m^2); default from config.daytime.ghi_min_wm2")
+    parser.add_argument("--daytime-mode", type=str, default=def_daytime_mode, choices=["ge", "ghi", "or", "and"],
+                        help="Daytime mask mode: ge|ghi|or|and; default from config.clustering.daytime_mode (recommend 'ghi')")
+    parser.add_argument("--daytime-ghi-min", type=float, default=def_daytime_ghi_min,
+                        help="Override daytime GHI threshold (W/m^2); default from config.clustering.daytime_ghi_min")
     # Thresholds/Bands
     parser.add_argument("--gray-width-ci", type=float, default=0.02)
     parser.add_argument("--gray-width-wsi", type=float, default=0.02)
@@ -983,12 +1057,10 @@ def main():
     prog.done(True)
     fe_cfg = config.get("feature_engineering", {})
     day_cfg = fe_cfg.get("daytime", {})
-    # CLI override for daytime thresholds/mode; fallback to config
-    override_ge = args.daytime_ge_min
-    used_ge_min = float(day_cfg.get("ge_min_wm2", 20.0)) if override_ge is None else float(override_ge)
-    used_ge_min = max(0.0, used_ge_min)
-    used_day_mode = (args.daytime_mode or day_cfg.get("mode", "ghi")).lower()
-    used_ghi_min = float(day_cfg.get("ghi_min_wm2", 5.0)) if args.daytime_ghi_min is None else float(args.daytime_ghi_min)
+    # Use CLI args directly (defaults already loaded from config in argparse)
+    used_ge_min = max(0.0, float(args.daytime_ge_min))
+    used_day_mode = str(args.daytime_mode).lower()
+    used_ghi_min = float(args.daytime_ghi_min)
     if used_day_mode not in {"ge", "ghi", "or", "and"}:
         used_day_mode = "ghi"
     # Reflect used values for logs
@@ -1056,6 +1128,7 @@ def main():
         feat_weight_diffuse=float(args.feat_weight_diffuse),
         feat_weight_z=float(args.feat_weight_z),
         features_basic_only=bool(args.features_basic_only),
+        return_transforms=True,
     )
     prog.update(100, "ok")
     prog.done(True)
@@ -1579,11 +1652,164 @@ def main():
             "pca_n": int(args.pca_n),
             "feature_count": int(X.shape[1]),
             "sample_count": int(label_array.size),
+            "feature_cols": meta.get("feature_cols", []),
         }
         dump_json(label_meta, out_dir / "cluster_labels_meta.json")
         logger.info("聚类标签已导出: %s", out_dir)
     except Exception as exc:
         logger.warning("导出聚类标签失败: %s", exc)
+
+    # Export scaler and pca for downstream inference
+    try:
+        scaler_obj = meta.get("scaler")
+        if scaler_obj is not None:
+            with open(out_dir / "weather_scaler.pkl", "wb") as f:
+                pickle.dump(scaler_obj, f)
+            logger.info("Scaler 已保存: %s", out_dir / "weather_scaler.pkl")
+        
+        pca_obj = meta.get("pca")
+        if pca_obj is not None:
+            with open(out_dir / "weather_pca.pkl", "wb") as f:
+                pickle.dump(pca_obj, f)
+            logger.info("PCA 已保存: %s", out_dir / "weather_pca.pkl")
+        
+        # Save feature weights
+        weights = meta.get("weights")
+        if weights is not None:
+            np.save(out_dir / "feature_weights.npy", np.array(weights))
+            logger.info("特征权重已保存: %s", out_dir / "feature_weights.npy")
+    except Exception as exc:
+        logger.warning("导出 scaler/pca/weights 失败: %s", exc)
+
+    # Train and export LightGBM weather classifier
+    prog.start("LightGBM")
+    if _HAVE_LIGHTGBM:
+        try:
+            lgb_params = {
+                "objective": "multiclass",
+                "num_class": 3,
+                "metric": "multi_logloss",
+                "boosting_type": "gbdt",
+                "num_leaves": 31,
+                "learning_rate": 0.05,
+                "feature_fraction": 0.8,
+                "bagging_fraction": 0.8,
+                "bagging_freq": 5,
+                "verbose": -1,
+                "seed": 42,
+            }
+            # Create LightGBM dataset
+            lgb_train = lgb.Dataset(X, label=label_array.astype(int))
+            # Train with early stopping simulation (fixed rounds)
+            lgb_model = lgb.train(
+                lgb_params,
+                lgb_train,
+                num_boost_round=100,
+                valid_sets=[lgb_train],
+                callbacks=[lgb.log_evaluation(period=0)],  # Suppress logs
+            )
+            # Save model (use booster_to_string for paths with non-ASCII chars)
+            lgb_model_path = out_dir / "weather_lgb_model.txt"
+            model_str = lgb_model.model_to_string()
+            with open(lgb_model_path, "w", encoding="utf-8") as f:
+                f.write(model_str)
+            
+            # Validate model accuracy (train set)
+            lgb_pred = lgb_model.predict(X)
+            lgb_pred_labels = np.argmax(lgb_pred, axis=1)
+            lgb_accuracy = float(np.mean(lgb_pred_labels == label_array))
+            
+            # Cross-validation to check generalization (5-fold)
+            cv_scores = []
+            n_samples = X.shape[0]
+            fold_size = n_samples // 5
+            indices = np.arange(n_samples)
+            np.random.shuffle(indices)
+            for fold_i in range(5):
+                val_start = fold_i * fold_size
+                val_end = val_start + fold_size if fold_i < 4 else n_samples
+                val_idx = indices[val_start:val_end]
+                train_idx = np.concatenate([indices[:val_start], indices[val_end:]])
+                
+                X_cv_train, y_cv_train = X[train_idx], label_array[train_idx]
+                X_cv_val, y_cv_val = X[val_idx], label_array[val_idx]
+                
+                cv_train_data = lgb.Dataset(X_cv_train, label=y_cv_train.astype(int))
+                cv_model = lgb.train(
+                    lgb_params, cv_train_data, num_boost_round=100,
+                    callbacks=[lgb.log_evaluation(period=0)]
+                )
+                cv_pred = np.argmax(cv_model.predict(X_cv_val), axis=1)
+                cv_scores.append(float(np.mean(cv_pred == y_cv_val)))
+            
+            cv_mean = float(np.mean(cv_scores))
+            cv_std = float(np.std(cv_scores))
+            
+            lgb_meta = {
+                "train_accuracy": lgb_accuracy,
+                "cv_accuracy_mean": cv_mean,
+                "cv_accuracy_std": cv_std,
+                "cv_scores": cv_scores,
+                "num_features": int(X.shape[1]),
+                "num_samples": int(X.shape[0]),
+                "params": lgb_params,
+            }
+            dump_json(lgb_meta, out_dir / "weather_lgb_meta.json")
+            logger.info(
+                "LightGBM 天气分类器已训练, 训练准确率: %.2f%%, 5折交叉验证: %.2f%% (+/- %.2f%%)",
+                lgb_accuracy * 100, cv_mean * 100, cv_std * 100
+            )
+            prog.update(100, f"acc={lgb_accuracy:.2%}")
+            prog.done(True)
+        except Exception as exc:
+            logger.warning("LightGBM 训练失败: %s", exc)
+            prog.done(False, str(exc))
+    else:
+        logger.warning("LightGBM 未安装, 跳过天气分类器训练。请运行: pip install lightgbm")
+        prog.done(False, "lightgbm not installed")
+
+    # Auto-update config to point to latest cluster results
+    prog.start("Update config")
+    try:
+        cfg_path = Path(args.config)
+        cfg_obj = load_yaml(cfg_path)
+        fe = cfg_obj.get("feature_engineering", {})
+        
+        # Update reuse_cluster_labels.splits.<split>
+        reuse_cfg = fe.get("reuse_cluster_labels", {})
+        splits_cfg = reuse_cfg.get("splits", {})
+        split_name = args.split  # train, val, or test
+        
+        # Calculate relative path from project root
+        try:
+            rel_path = out_dir.relative_to(PROJECT_ROOT)
+        except ValueError:
+            rel_path = out_dir
+        
+        splits_cfg[split_name] = {
+            "labels_path": str(rel_path / "cluster_labels.npy"),
+            "timestamps_path": str(rel_path / "cluster_timestamps.parquet"),
+            "meta_path": str(rel_path / "cluster_labels_meta.json"),
+        }
+        reuse_cfg["splits"] = splits_cfg
+        fe["reuse_cluster_labels"] = reuse_cfg
+        
+        # Update weather_lgb_classifier.model_dir for train split only
+        if split_name == "train":
+            lgb_cfg = fe.get("weather_lgb_classifier", {})
+            lgb_cfg["model_dir"] = str(rel_path)
+            fe["weather_lgb_classifier"] = lgb_cfg
+        
+        cfg_obj["feature_engineering"] = fe
+        dump_yaml(cfg_obj, cfg_path)
+        logger.info("已自动更新配置 %s.splits.%s -> %s", "reuse_cluster_labels", split_name, rel_path)
+        if split_name == "train":
+            logger.info("已自动更新配置 weather_lgb_classifier.model_dir -> %s", rel_path)
+        prog.update(100, "ok")
+        prog.done(True)
+    except Exception as e:
+        logger.warning("自动更新配置失败: %s", e)
+        prog.done(False, str(e))
 
     # Optionally write thresholds back to config
     if args.write_config:

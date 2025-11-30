@@ -995,7 +995,19 @@ class DataLoader:
             for j, h in enumerate(horizons):
                 y[i, j] = targets[end + h - 1]  # multi-step target
             if weather_seq is not None:
-                weather_seq[i] = int(weather_array[end - 1])  # weather label at sequence end
+                # Use majority voting for sequence weather label
+                # Priority: overcast(2) > cloudy(1) > sunny(0) when tied
+                seq_weather = weather_array[start:end]
+                valid_weather = seq_weather[seq_weather >= 0]
+                if len(valid_weather) > 0:
+                    counts = np.bincount(valid_weather.astype(int), minlength=3)
+                    max_count = counts.max()
+                    # Find all labels with max count (handle ties)
+                    candidates = np.where(counts == max_count)[0]
+                    # Priority: overcast(2) > cloudy(1) > sunny(0)
+                    weather_seq[i] = int(candidates.max())
+                else:
+                    weather_seq[i] = 1  # Default to cloudy if no valid labels
 
         if weather_seq is not None:
             return X, y, weather_seq

@@ -24,7 +24,9 @@ from pathlib import Path
 import json
 import numpy as np
 from datetime import datetime
+import time
 import matplotlib.pyplot as plt
+from .diagnostics import TrainingDiagnostics
 
 # 设置matplotlib中文字体
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
@@ -95,15 +97,17 @@ class GPUOptimizedTrainer:
         - config: 训练配置
         - device: 计算设备
         - log_dir: 日志目录，用于保存loss曲线图
-        - power_scale: 功率缩放因子（用于将归一化误差还原到物理功率尺度）
+        - power_scale: 功率缩放因子（用于将归一化误差还原到物理功率尺度）。
+                       如果为 None，表示目标值已经是 power/prated 形式。
         - prated: 装机容量 (kW)
         """
-        # 验证 power_scale 和 prated 必须提供
-        if power_scale is None or prated is None:
-            raise ValueError("power_scale 和 prated 必须提供，用于计算 NRMSE")
+        # 验证 prated 必须提供
+        if prated is None:
+            raise ValueError("prated 必须提供，用于计算 NRMSE")
         if prated <= 0:
             raise ValueError(f"prated 必须大于 0，当前值: {prated}")
-        if power_scale <= 0:
+        # power_scale 可以为 None（表示目标值已按额定功率归一化）
+        if power_scale is not None and power_scale <= 0:
             raise ValueError(f"power_scale 必须大于 0，当前值: {power_scale}")
         
         self.power_scale = power_scale
@@ -167,17 +171,35 @@ class GPUOptimizedTrainer:
         self._original_sigint_handler = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, self._handle_interrupt)
 
+        # 训练诊断收集器（每5个epoch收集完整信息）
+        diag_interval = config.get('diagnostics_interval', 5)
+        self.diagnostics = TrainingDiagnostics(
+            save_dir=self.log_dir,
+            collect_interval=diag_interval
+        )
+
         logger.info(f"训练器初始化完成，设备: {self.device}")
-        logger.info(f"NRMSE 计算参数: power_scale={self.power_scale:.4f}, prated={self.prated:.2f} kW")
+        if self.power_scale is not None:
+            logger.info(f"NRMSE 计算参数: power_scale={self.power_scale:.4f}, prated={self.prated:.2f} kW")
+        else:
+            logger.info(f"NRMSE 计算参数: 目标值已按额定功率归一化, prated={self.prated:.2f} kW")
 
     def _mse_to_nrmse(self, mse: float) -> float:
         """将 MSE 转换为 NRMSE (%)，以装机容量归一化
         
-        公式: NRMSE = sqrt(MSE) * power_scale / prated
+        当 power_scale 为 None 时，表示目标值已经是 power/prated 形式，
+        此时 NRMSE = sqrt(MSE) 直接就是相对于额定功率的误差比例。
+        
+        当 power_scale 有值时，使用原公式: NRMSE = sqrt(MSE) * power_scale / prated
         """
         rmse = math.sqrt(mse)
-        nrmse = rmse * self.power_scale / self.prated
-        return nrmse
+        if self.power_scale is None:
+            # 目标值已经是 power/prated，RMSE 直接就是 NRMSE
+            return rmse
+        else:
+            # 目标值是 minmax 归一化的，需要还原尺度
+            nrmse = rmse * self.power_scale / self.prated
+            return nrmse
 
     def _setup_optimizers(self):
         """设置优化器和学习率调度器"""
@@ -348,6 +370,7 @@ class GPUOptimizedTrainer:
         }
 
         for epoch in range(epochs):
+            epoch_start_time = time.time()
             val_results: Dict[str, Dict[str, float]] = {}
 
             if self.streams and torch.cuda.is_available():
@@ -396,6 +419,22 @@ class GPUOptimizedTrainer:
                     self.train_history[weather_type]['grad_last'].append(0.0)
                     self.train_history[weather_type]['grad_avg'].append(0.0)
                     self.train_history[weather_type]['grad_max'].append(0.0)
+
+            # 收集训练诊断信息
+            epoch_time = time.time() - epoch_start_time
+            collect_full = ((epoch + 1) % self.diagnostics.collect_interval == 0) or (epoch == 0)
+            for weather_type, result in train_results.items():
+                if weather_type in train_loaders:
+                    self.diagnostics.collect_epoch_diagnostics(
+                        epoch=epoch + 1,
+                        weather=weather_type,
+                        model=self.models[weather_type],
+                        train_loader=train_loaders[weather_type],
+                        loss=result['loss'],
+                        lr=result['lr'],
+                        epoch_time=epoch_time,
+                        collect_full=collect_full
+                    )
 
             # 验证（如果提供了验证集）
             if val_loaders:
@@ -456,7 +495,12 @@ class GPUOptimizedTrainer:
                 nrmse_pct = self._mse_to_nrmse(m['loss']) * 100
                 base = f"{weather_name_map.get(weather, weather)}={nrmse_pct:.2f}%"
                 if self.log_gradients and 'grad_norm_last' in m:
-                    return base + f"(g{m['grad_norm_last']:.2f})"
+                    grad_val = m['grad_norm_last']
+                    # 使用科学计数法显示小梯度
+                    if grad_val < 0.01:
+                        return base + f"(g{grad_val:.1e})"
+                    else:
+                        return base + f"(g{grad_val:.2f})"
                 return base
             train_nrmse_str = "， ".join(
                 _fmt_train_metrics(weather, metrics) for weather, metrics in train_results.items()
@@ -715,6 +759,14 @@ class GPUOptimizedTrainer:
             json.dump(self.train_history, f, ensure_ascii=False, indent=2)
         print(f"[*] 训练历史已保存至: {save_path}")
         sys.stdout.flush()
+
+        # 保存训练诊断信息
+        try:
+            self.diagnostics.save(save_dir)
+            # 打印诊断摘要（仅关键问题）
+            self.diagnostics.print_summary()
+        except Exception as e:
+            logger.warning(f"保存训练诊断失败: {e}")
 
     def plot_loss_curves(self, save_dir: Optional[str] = None) -> None:
         """绘制并保存 NRMSE 曲线图"""

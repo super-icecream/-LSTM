@@ -1,17 +1,15 @@
-# DLFE-LSTM-WSI 主配置文件
 project:
-  name: "DLFE-LSTM-WSI"
-  version: "1.0.0"
+  name: DLFE-LSTM-WSI
+  version: 1.0.0
   seed: 42
-  device: "cuda:0"
+  device: cuda:0
   log_dir: ./experiments/logs
   checkpoint_dir: ./experiments/checkpoints
   results_dir: ./experiments/results
-
 data:
-  dataset: "甘肃光伏功率预测数据集"
-  raw_dir: "./datas/2. 甘肃光伏功率预测数据集/data_original/solar_stations"
-  merge_method: "single"
+  dataset: 甘肃光伏功率预测数据集
+  raw_dir: ./datas/2. 甘肃光伏功率预测数据集/data_original/solar_stations
+  merge_method: single
   train_ratio: 0.7
   val_ratio: 0.2
   test_ratio: 0.1
@@ -19,8 +17,12 @@ data:
   frequency_minutes: 15
   station_column: station
   timestamp_column: timestamp
-  required_columns: [power, irradiance, temperature, pressure, humidity]
-
+  required_columns:
+  - power
+  - irradiance
+  - temperature
+  - pressure
+  - humidity
 walk_forward:
   enable: true
   n_folds: 4
@@ -48,45 +50,70 @@ walk_forward:
   weight_inheritance:
     enable: true
     strategy: full
-
 preprocessing:
   caching: true
   cache_dir: ./data/cache
   normalization:
     method: minmax
-    feature_range: [0, 1]
+    feature_range:
+    - 0
+    - 1
   vmd:
     n_modes: 5
     alpha: 2000
     tau: 0.1
-    tolerance: 1.0e-6
+    tolerance: 1.0e-06
     max_iterations: 500
-
 feature_engineering:
-  ci_thresholds: [0.34075845181405107, 0.4009113122074764]
-  wsi_thresholds: [0.7541151075794098, 0.7554378813685727]
+  ci_thresholds:
+  - 0.34075845181405107
+  - 0.4009113122074764
+  wsi_thresholds:
+  - 0.7541151075794098
+  - 0.7554378813685727
   fusion_weights:
     ci: 0.7
     wsi: 0.3
+  clustering:
+    daytime_mode: ghi
+    daytime_ghi_min: 5.0
+    daytime_ge_min: 20.0
+    features_basic_only: true
+    window_mins: 60
+    min_samples_per_window: 3
+    scaler: robust
+    use_pca: false
+    pca_n: 10
+    feat_weight_tod: 3.0
+    feat_weight_diffuse: 3.0
+    feat_weight_z: 1.0
+    learn_prototypes: true
+    proto_sunny: src/tools/晴天.xlsx
+    proto_cloudy: src/tools/多云.xlsx
+    proto_overcast: src/tools/雨天.xlsx
+    prototypes_min_count: 30
+    prototypes_tol_mins: 8
   reuse_cluster_labels:
     enabled: true
-    fallback: classify    # classify | drop (当前仅支持 classify)
-    min_coverage: 0.95    # 日间覆盖率低于该阈值时发出警告
+    fallback: classify
+    min_coverage: 0.95
+    use_combined_only: true  # 直接使用合并标签，跳过单独split匹配
     splits:
       train:
-        labels_path: diagnostics/init_thresholds/init_20251119_235137/cluster_labels.npy
-        timestamps_path: diagnostics/init_thresholds/init_20251119_235137/cluster_timestamps.parquet
-        meta_path: diagnostics/init_thresholds/init_20251119_235137/cluster_labels_meta.json
+        labels_path: diagnostics\init_thresholds\init_20251129_165938\cluster_labels.npy
+        timestamps_path: diagnostics\init_thresholds\init_20251129_165938\cluster_timestamps.parquet
+        meta_path: diagnostics\init_thresholds\init_20251129_165938\cluster_labels_meta.json
       val:
-        labels_path: diagnostics/init_thresholds/init_20251120_120224/cluster_labels.npy
-        timestamps_path: diagnostics/init_thresholds/init_20251120_120224/cluster_timestamps.parquet
-        meta_path: diagnostics/init_thresholds/init_20251120_120224/cluster_labels_meta.json
+        labels_path: diagnostics\init_thresholds\init_20251129_165956\cluster_labels.npy
+        timestamps_path: diagnostics\init_thresholds\init_20251129_165956\cluster_timestamps.parquet
+        meta_path: diagnostics\init_thresholds\init_20251129_165956\cluster_labels_meta.json
       test:
-        labels_path: diagnostics/init_thresholds/init_20251120_120245/cluster_labels.npy
-        timestamps_path: diagnostics/init_thresholds/init_20251120_120245/cluster_timestamps.parquet
-        meta_path: diagnostics/init_thresholds/init_20251120_120245/cluster_labels_meta.json
+        labels_path: diagnostics\init_thresholds\init_20251129_170010\cluster_labels.npy
+        timestamps_path: diagnostics\init_thresholds\init_20251129_170010\cluster_timestamps.parquet
+        meta_path: diagnostics\init_thresholds\init_20251129_170010\cluster_labels_meta.json
+  weather_lgb_classifier:
+    model_dir: diagnostics\init_thresholds\init_20251129_165938
   daytime:
-    # 日间掩码：固化为 GHI 法，阈值 5 W/m²（如需改回 GE 可切换 mode 并调整 ge_min_wm2）
     mode: ghi
     ghi_min_wm2: 5.0
     ge_min_wm2: 20.0
@@ -104,29 +131,29 @@ feature_engineering:
     alpha: 0.0009765625
     beta: 0.1
     max_iter: 100
-    tol: 1.0e-5
+    tol: 1.0e-05
     use_float32_eigh: false
     use_sparse_matrix: true
-
 model:
-  # Multi-output dims align with evaluation.horizons
   output_dim: 3
   lstm:
-    hidden_sizes: [100, 50]
-    dropout_rates: [0.3, 0.2]
-
+    hidden_sizes:
+    - 100
+    - 50
+    dropout_rates:
+    - 0.3
+    - 0.2
 training:
   batch_size: 64
   epochs: 100
-  learning_rate: 0.01
+  learning_rate: 0.001
   optimizer: adamw
   weight_decay: 0.01
   scheduler:
     type: cosine
-    eta_min: 1.0e-6
+    eta_min: 1.0e-06
   gradient_accumulation_steps: 4
   num_workers: 4
-
 adaptive:
   error_window: 100
   trigger_thresholds:
@@ -134,13 +161,17 @@ adaptive:
     level2: 0.15
     level3: 0.05
     level4: 5
-
 evaluation:
   device: auto
-  prated: 50            # 机组装机容量（MW）
-  # Multi-horizon forecasts: 15/30/60 minutes (15 min per step)
-  horizons: [1, 2, 4]
-  metrics: [RMSE, MAE, NRMSE]
+  prated: 50
+  horizons:
+  - 1
+  - 2
+  - 4
+  metrics:
+  - RMSE
+  - MAE
+  - NRMSE
   calculate_confidence: true
   confidence_level: 0.95
   n_bootstrap: 1000

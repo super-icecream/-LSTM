@@ -384,7 +384,8 @@ class WeatherClassifier:
                 ghi_col: str = 'irradiance',
                 pressure_col: str = 'pressure',
                 humidity_col: str = 'humidity',
-                temperature_col: str = 'temperature') -> Dict[str, np.ndarray]:
+                temperature_col: str = 'temperature',
+                silent: bool = False) -> Dict[str, np.ndarray]:
         """
         双路径融合天气分类，并返回白天掩码与路径信息。
 
@@ -394,6 +395,7 @@ class WeatherClassifier:
             pressure_col: 气压列名。
             humidity_col: 湿度列名。
             temperature_col: 温度列名。
+            silent: 是否禁用日志输出（当使用聚类标签覆盖时设为True）。
 
         Returns:
             包含标签、白天掩码及路径诊断信息的字典。
@@ -453,7 +455,8 @@ class WeatherClassifier:
             'transitions': 0
         }
 
-        logger.info('天气分类分布(白天末端): %s', stats.get('distribution', {}))
+        if not silent:
+            logger.info('天气分类分布(CI/WSI阈值): %s', stats.get('distribution', {}))
 
         if isinstance(day_arr, np.ndarray):
             self.last_day_mask = day_arr.copy()

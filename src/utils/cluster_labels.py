@@ -105,6 +105,53 @@ def assign_cluster_labels(
     day_mask_arr = (
         np.asarray(day_mask, dtype=bool) if day_mask is not None else np.ones(len(index), dtype=bool)
     )
+    
+    # 诊断：打印时间范围对比
+    bundle_index = bundle.series.index
+    logger.info(
+        "[聚类标签诊断] %s: 当前数据时间范围=[%s ~ %s], 样本数=%d, 白天样本=%d",
+        split_name,
+        index.min() if len(index) > 0 else "N/A",
+        index.max() if len(index) > 0 else "N/A",
+        len(index),
+        int(day_mask_arr.sum()),
+    )
+    logger.info(
+        "[聚类标签诊断] %s: 聚类标签时间范围=[%s ~ %s], 标签数=%d, 来源=%s",
+        split_name,
+        bundle_index.min() if len(bundle_index) > 0 else "N/A",
+        bundle_index.max() if len(bundle_index) > 0 else "N/A",
+        len(bundle_index),
+        bundle.source,
+    )
+    
+    # 检查时间戳是否有交集
+    common_count = len(index.intersection(bundle_index))
+    logger.info(
+        "[聚类标签诊断] %s: 精确匹配的时间戳数量=%d (%.2f%%)",
+        split_name,
+        common_count,
+        (common_count / len(index) * 100) if len(index) > 0 else 0,
+    )
+    
+    # 如果匹配数为0，打印样例帮助排查
+    if common_count == 0 and len(index) > 0 and len(bundle_index) > 0:
+        sample_idx = index[:3].tolist()
+        sample_bundle = bundle_index[:3].tolist()
+        logger.warning(
+            "[聚类标签诊断] %s: 无精确匹配! 当前数据前3个时间戳=%s, 聚类标签前3个时间戳=%s",
+            split_name,
+            sample_idx,
+            sample_bundle,
+        )
+        # 检查时间戳类型
+        logger.warning(
+            "[聚类标签诊断] %s: 当前索引dtype=%s, 聚类索引dtype=%s",
+            split_name,
+            index.dtype,
+            bundle_index.dtype,
+        )
+    
     matched = bundle.series.reindex(index)
     reuse_mask = matched.notna()
 
@@ -116,6 +163,16 @@ def assign_cluster_labels(
     day_matched = int((reuse_mask.to_numpy() & day_mask_arr).sum())
     fallback_day = int((~reuse_mask.to_numpy() & day_mask_arr).sum())
     coverage_day = (day_matched / day_samples) if day_samples else float("nan")
+    
+    logger.info(
+        "[聚类标签结果] %s: 白天覆盖率=%.3f (匹配=%d, 总白天=%d, 回退=%d)",
+        split_name,
+        coverage_day,
+        day_matched,
+        day_samples,
+        fallback_day,
+    )
+    
     stats = {
         "total_samples": len(index),
         "matched_total": int(reuse_mask.sum()),

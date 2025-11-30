@@ -178,7 +178,8 @@ class ModelBuilder:
             elif isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
-                    nn.init.zeros_(m.bias)
+                    # 输出层偏置初始化为 0.3（接近目标值均值），加速收敛
+                    nn.init.constant_(m.bias, 0.3)
 
         model.apply(init_weights)
 

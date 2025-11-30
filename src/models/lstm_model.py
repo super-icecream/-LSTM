@@ -75,9 +75,12 @@ class LSTMPredictor(nn.Module):
         )
         self.dropout2 = nn.Dropout(dropout_rates[1])
 
-        # 输出层
+        # 输出层（回归任务不使用激活函数）
         self.fc = nn.Linear(hidden_dims[1], output_dim)
-        self.sigmoid = nn.Sigmoid()
+        # 注意：回归任务输出层不应使用激活函数
+        # - Sigmoid: 会导致梯度消失
+        # - ReLU: 会导致死神经元（输出恒为0，梯度为0）
+        # 功率非负约束应在后处理阶段用 clamp(0, 1) 实现
 
         # 将模型移到GPU
         self.to(self.device)
@@ -124,7 +127,8 @@ class LSTMPredictor(nn.Module):
 
         # 全连接层（GPU矩阵乘法）
         output = self.fc(last_output)
-        output = self.sigmoid(output)
+        # 回归任务：不使用激活函数，允许自由学习
+        # 负值/超限值在评估时用 clamp(0, 1) 处理
 
         return output, (hidden1, hidden2)
 

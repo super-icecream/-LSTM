@@ -1,0 +1,27 @@
+{
+  "train_accuracy": 0.999876492383697,
+  "cv_accuracy_mean": 0.9947715109098395,
+  "cv_accuracy_std": 0.0007433293571538768,
+  "cv_scores": [
+    0.9950596953478797,
+    0.9960889254837382,
+    0.9944421572663648,
+    0.9940304652120214,
+    0.9942363112391931
+  ],
+  "num_features": 9,
+  "num_samples": 24290,
+  "params": {
+    "objective": "multiclass",
+    "num_class": 3,
+    "metric": "multi_logloss",
+    "boosting_type": "gbdt",
+    "num_leaves": 31,
+    "learning_rate": 0.05,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "verbose": -1,
+    "seed": 42
+  }
+}

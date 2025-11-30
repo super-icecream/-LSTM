@@ -183,27 +183,40 @@ class PerformanceMetrics:
         effective_prated = prated if prated is not None else self.prated
         effective_power_scale = power_scale if power_scale is not None else getattr(self, "power_scale", None)
 
+        # 判断目标值是否已经按额定功率归一化
+        # 当 power_scale 为 None 但 prated 有值时，认为目标值已经是 power/prated 形式
+        target_already_normalized = (
+            effective_power_scale is None
+            and effective_prated is not None
+            and effective_prated > self.epsilon
+        )
+
         use_capacity_norm = (
             effective_prated is not None
             and effective_power_scale is not None
             and effective_prated > self.epsilon
         )
 
-        if use_capacity_norm:
+        if target_already_normalized:
+            # 目标值已经是 power/prated 形式，RMSE(raw) 直接就是 NRMSE
+            rmse = rmse_raw
+            mae = mae_raw
+            nrmse = rmse_raw  # 相对于额定功率的误差比例
+        elif use_capacity_norm:
             rmse_phys = rmse_raw * float(effective_power_scale)
             mae_phys = mae_raw * float(effective_power_scale)
             rmse = rmse_phys / float(effective_prated)
             mae = mae_phys / float(effective_prated)
             nrmse = rmse  # 按容量归一后，NRMSE 等同于 RMSE
         else:
-            # 缺少 prated 或 power_scale，或 prated 非法：保留 raw
+            # 缺少 prated，保留 raw
             rmse = rmse_raw
             mae = mae_raw
             nrmse = nrmse_raw
-            if effective_prated is None or effective_power_scale is None:
+            if effective_prated is None:
                 logger.warning(
-                    "缺少 prated 或 power_scale，主指标保留为归一化尺度（raw）。prated=%s, power_scale=%s",
-                    str(effective_prated), str(effective_power_scale)
+                    "缺少 prated，主指标保留为归一化尺度（raw）。prated=%s",
+                    str(effective_prated)
                 )
             elif effective_prated <= self.epsilon:
                 logger.warning("prated 无效（%.6f），主指标保留为归一化尺度（raw）", float(effective_prated))
