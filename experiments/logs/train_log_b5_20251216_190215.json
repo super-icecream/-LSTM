@@ -1,0 +1,11 @@
+{
+  "timestamp": "20251216_190215",
+  "stage": "B5",
+  "soft_mode": "none",
+  "temperature": 1.0,
+  "alpha": 1.0,
+  "n_test_samples": 1117,
+  "hard_4h_nrmse": 0.14131897918089426,
+  "soft_4h_nrmse": 0.13561943501197482,
+  "delta_4h_nrmse": -0.005699544168919435
+}

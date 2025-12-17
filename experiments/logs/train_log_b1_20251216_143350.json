@@ -1,0 +1,43 @@
+{
+  "config_snapshot": {
+    "Lx": 16,
+    "Hmax": 16,
+    "daylight_enabled": true,
+    "daylight_mode": "mask",
+    "feature_columns": [
+      "Power (MW)"
+    ],
+    "nominal_capacity_mw": 50,
+    "hidden_size": 64,
+    "num_layers": 2,
+    "dropout": 0.1,
+    "lr": 0.001,
+    "batch_size": 256,
+    "max_epochs": 100,
+    "patience": 10
+  },
+  "train_result": {
+    "best_epoch": 18,
+    "best_val_loss": 0.017775363373485478,
+    "best_val_rmse_4h_pu": 0.13350948691368103,
+    "stopped_early": true,
+    "total_epochs": 28
+  },
+  "test_metrics": {
+    "1h": {
+      "mae_mw": 4.57817132179961,
+      "rmse_mw": 7.1032728757958195,
+      "nrmse": 0.1420654575159164
+    },
+    "2h": {
+      "mae_mw": 5.086213273653555,
+      "rmse_mw": 7.427658055259614,
+      "nrmse": 0.1485531611051923
+    },
+    "4h": {
+      "mae_mw": 8.02232586472055,
+      "rmse_mw": 9.51053579164093,
+      "nrmse": 0.1902107158328186
+    }
+  }
+}

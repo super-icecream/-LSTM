@@ -1,0 +1,138 @@
+# =============================================================================
+# B0 阶段配置文件
+# 所有关键参数集中管理，便于后续扩展到 B1/B2/...
+# =============================================================================
+
+# 数据配置
+data:
+  # 数据文件路径
+  file_path: "datas/2. 甘肃光伏功率预测数据集/data_processed/solar_stations/Solar station site 1 (Nominal capacity-50MW).xlsx"
+  # 时间列名
+  time_column: "Time(year-month-day h:m:s)"
+  # 时间格式
+  time_format: "%Y-%m-%d %H:%M:%S"
+  # 目标列（功率）
+  target_column: "Power (MW)"
+  # 时间间隔（分钟）
+  time_interval_minutes: 15
+  # 装机容量（MW），用于 nRMSE 归一化
+  nominal_capacity_mw: 50
+
+# 数据切分配置
+split:
+  # 切分比例：train / val / test（按天数比例）
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+
+# 滑窗配置
+window:
+  # 输入窗口长度（步数），Lx = 16 对应 4 小时（16 * 15min = 240min）
+  input_length: 16
+  # 最大预测步长，Hmax = 16 对应 4 小时
+  max_horizon: 16
+
+# 评估配置
+evaluation:
+  # 评估的预测步长列表（步数）
+  # 1h = 4步, 2h = 8步, 4h = 16步
+  horizons:
+    - 4
+    - 8
+    - 16
+  # 步长对应的名称（用于输出）
+  horizon_names:
+    4: "1h"
+    8: "2h"
+    16: "4h"
+
+# 白天筛选配置
+# 用于剔除夜间样本，只评估白天时段的预测性能
+daylight_filter:
+  # 是否启用白天筛选
+  enabled: true
+  # 辐照度列名（用于判断白天）
+  dni_col: "Total solar irradiance (W/m2)"
+  # DNI 阈值：>= threshold 视为白天
+  threshold: 5
+  # 筛选模式：
+  # - "drop": 直接删除夜间行，时间戳会不连续，滑窗时会因不连续而断开
+  # - "mask": 不删除行，但滑窗时要求锚点处是白天，否则跳过该样本（默认）
+  mode: "mask"
+
+# 模型配置 (B1+)
+model:
+  # LSTM 隐藏层维度
+  hidden_size: 64
+  # LSTM 层数
+  num_layers: 2
+  # Dropout 比例
+  dropout: 0.1
+
+# 训练配置 (B1+)
+training:
+  # 学习率
+  lr: 0.001
+  # 批次大小
+  batch_size: 256
+  # 最大训练轮数
+  max_epochs: 100
+  # Early stopping patience
+  patience: 10
+  # 设备: "auto" 自动选择, "cuda" 强制GPU, "cpu" 强制CPU
+  device: "auto"
+  # 随机种子 (用于 random/numpy/torch, 确保可复现性)
+  seed: 42
+  # 确定性模式: true 时设置 cudnn.deterministic=True, cudnn.benchmark=False
+  # 可复现但可能略慢; false 时允许 cudnn.benchmark 加速但结果可能有微小差异
+  deterministic: true
+  # 是否启用 cudnn.benchmark (仅当 deterministic=false 时生效)
+  cudnn_benchmark: true
+
+# PCA 配置 (B3+)
+pca:
+  # 固定维数: 若不为 null 则优先使用固定维数，忽略 var_ratio 和 fallback 逻辑
+  n_components: 3
+  # 自动选维数: 按解释方差比例选择 (仅当 n_components 为 null 时生效)
+  var_ratio: 0.95
+  # 最大维数阈值: 若自动选维数超过此值则使用 fallback_dim
+  max_dim: 10
+  # 回退维数: 当自动选维数超过 max_dim 时使用
+  fallback_dim: 8
+  # 随机种子
+  random_state: 42
+
+# 软路由配置 (B5)
+soft_routing:
+  # 路由模式: "hard" 仅用 argmax 选择单专家输出, "soft" 加权融合多专家输出
+  routing_mode: "hard"
+  # 温度缩放参数 T: u = softmax(log(u+eps)/T)
+  # T=1.0 时不做温度缩放; T<1 锐化分布, T>1 平滑分布
+  # 仅在 routing_mode="soft" 时生效
+  temperature: 1.0
+  # 幂次调整参数 alpha: u = (u**alpha) / sum(u**alpha)
+  # alpha=1.0 时不做幂次调整; alpha>1 锐化分布, alpha<1 平滑分布
+  # 仅在 routing_mode="soft" 时生效
+  alpha: 0.7
+  # Alpha sweep 列表 (用于 sweep_b5_alpha.py)
+  alpha_list:
+    - 0.5
+    - 0.7
+    - 1.0
+    - 1.2
+    - 1.5
+    - 2.0
+    - 3.0
+  # Alpha sweep 专家模型配置
+  # use_warm_experts: true 时加载 warm-start 专家 (model_expert_*_warm.pt)
+  # use_warm_experts: false 时加载 B4 原始专家 (model_expert_*.pt)
+  use_warm_experts: true
+  # 专家模型文件名后缀 (不含 .pt): "" 为 B4 原始, "_warm" 为 B5.5 warm-start
+  experts_suffix: "_warm"
+
+# 输出配置
+output:
+  # 结果输出目录
+  results_dir: "experiments/results"
+  # 日志输出目录
+  logs_dir: "experiments/logs"

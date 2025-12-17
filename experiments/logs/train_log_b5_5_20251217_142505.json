@@ -1,0 +1,11 @@
+{
+  "timestamp": "20251217_142505",
+  "stage": "B5.5",
+  "routing_mode": "hard",
+  "warm_start_enabled": true,
+  "lr_scale_finetune": 0.1,
+  "temperature_T": null,
+  "alpha": null,
+  "n_test_samples": 4527,
+  "4h_nrmse": 0.13551763622298435
+}

@@ -1,0 +1,41 @@
+{
+  "model_name": "lstm_global_b2",
+  "experiment_name": "b2",
+  "timestamp": "20251216_153620",
+  "total_samples": 1117,
+  "daylight_filter": {
+    "enabled": true,
+    "dni_col": "Total solar irradiance (W/m2)",
+    "threshold": 5,
+    "mode": "mask"
+  },
+  "horizons": {
+    "1h": {
+      "horizon_steps": 4,
+      "mae": 3.7849636640999025,
+      "rmse": 6.034490451772128,
+      "nrmse": 0.12068980903544256,
+      "n_samples": 1117
+    },
+    "2h": {
+      "horizon_steps": 8,
+      "mae": 4.5403564335359805,
+      "rmse": 6.759540640515145,
+      "nrmse": 0.1351908128103029,
+      "n_samples": 1117
+    },
+    "4h": {
+      "horizon_steps": 16,
+      "mae": 6.018844305047517,
+      "rmse": 7.390547708929347,
+      "nrmse": 0.14781095417858695,
+      "n_samples": 1117
+    }
+  },
+  "overall": {
+    "mae": 4.781388134227799,
+    "rmse": 6.75096684733048,
+    "nrmse": 0.13501933694660959,
+    "n_samples": 3351
+  }
+}

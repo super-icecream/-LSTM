@@ -1,0 +1,90 @@
+{
+  "experiment": "B4: Hard-routing Multi-Expert LSTM",
+  "timestamp": "20251217_142257",
+  "n_clusters": 3,
+  "overall_metrics": {
+    "1h": {
+      "mae": 3.1352431774139404,
+      "rmse": 4.738784313201904,
+      "nrmse": 0.09477568417787552
+    },
+    "2h": {
+      "mae": 3.879000663757324,
+      "rmse": 5.852472305297852,
+      "nrmse": 0.1170494481921196
+    },
+    "4h": {
+      "mae": 4.5453667640686035,
+      "rmse": 7.085868835449219,
+      "nrmse": 0.14171737432479858
+    }
+  },
+  "cluster_distribution": {
+    "train": {
+      "0": 9423,
+      "1": 8215,
+      "2": 6383
+    },
+    "val": {
+      "0": 1872,
+      "1": 2259,
+      "2": 1874
+    },
+    "test": {
+      "0": 1309,
+      "1": 2902,
+      "2": 316
+    }
+  },
+  "cluster_semantic_map": {
+    "1": "clear",
+    "2": "cloudy",
+    "0": "low_irradiance"
+  },
+  "expert_training": {
+    "0": {
+      "best_epoch": 45,
+      "best_val_loss": 0.017602482810616493,
+      "train_samples": 9423,
+      "val_samples": 1872
+    },
+    "1": {
+      "best_epoch": 23,
+      "best_val_loss": 0.011009535752236843,
+      "train_samples": 8215,
+      "val_samples": 2259
+    },
+    "2": {
+      "best_epoch": 17,
+      "best_val_loss": 0.0161720160394907,
+      "train_samples": 6383,
+      "val_samples": 1874
+    }
+  },
+  "cluster_metrics_test": [
+    {
+      "cluster_id": 0,
+      "n_samples": 1309,
+      "nrmse_1h": 0.08716501295566559,
+      "nrmse_2h": 0.12355037033557892,
+      "nrmse_4h": 0.17698445916175842,
+      "avg_membership": 0.8873979389714357
+    },
+    {
+      "cluster_id": 1,
+      "n_samples": 2902,
+      "nrmse_1h": 0.09131888300180435,
+      "nrmse_2h": 0.10835530608892441,
+      "nrmse_4h": 0.11941521614789963,
+      "avg_membership": 0.8178683317027716
+    },
+    {
+      "cluster_id": 2,
+      "n_samples": 316,
+      "nrmse_1h": 0.14361783862113953,
+      "nrmse_2h": 0.15880286693572998,
+      "nrmse_4h": 0.16434042155742645,
+      "avg_membership": 0.6758131662241212
+    }
+  ]
+}

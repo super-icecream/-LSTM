@@ -1,0 +1,22 @@
+{
+  "config_snapshot": {
+    "Lx": 16,
+    "Hmax": 16,
+    "daylight_enabled": true,
+    "daylight_mode": "mask",
+    "feature_columns": [
+      "Power (MW)"
+    ],
+    "nominal_capacity_mw": 50,
+    "hidden_size": 64,
+    "num_layers": 2,
+    "dropout": 0.1,
+    "lr": 0.001,
+    "batch_size": 256,
+    "max_epochs": 100,
+    "patience": 10
+  },
+  "train_result": {
+    "best_epoch": 22,
+    "best_val_loss": 0.017042007381943138,
+    "best_val_rmse_4h_pu": 

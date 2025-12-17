@@ -1,0 +1,15 @@
+{
+  "n_components": 3,
+  "mode": "fixed",
+  "total_explained_variance": 0.6229057908058167,
+  "explained_variance_ratio": [
+    0.3262847661972046,
+    0.1671791523694992,
+    0.12944185733795166
+  ],
+  "cumulative_variance_ratio": [
+    0.3262847661972046,
+    0.493463933467865,
+    0.6229057908058167
+  ]
+}

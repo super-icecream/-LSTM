@@ -1,0 +1,73 @@
+{
+  "n_clusters": 3,
+  "m": 2.0,
+  "max_iter": 300,
+  "tol": 1e-05,
+  "n_init": 10,
+  "random_seed": 42,
+  "best_run_id": 7,
+  "best_jm": 132705.84413819783,
+  "best_n_iter": 62,
+  "run_history": [
+    {
+      "run_id": 0,
+      "jm": 132706.03560183983,
+      "n_iter": 66,
+      "random_state": 42
+    },
+    {
+      "run_id": 1,
+      "jm": 132706.02775729675,
+      "n_iter": 59,
+      "random_state": 43
+    },
+    {
+      "run_id": 2,
+      "jm": 132706.03162331393,
+      "n_iter": 69,
+      "random_state": 44
+    },
+    {
+      "run_id": 3,
+      "jm": 132706.04110738734,
+      "n_iter": 67,
+      "random_state": 45
+    },
+    {
+      "run_id": 4,
+      "jm": 132706.0358536216,
+      "n_iter": 67,
+      "random_state": 46
+    },
+    {
+      "run_id": 5,
+      "jm": 132705.85500601179,
+      "n_iter": 68,
+      "random_state": 47
+    },
+    {
+      "run_id": 6,
+      "jm": 132705.84743611384,
+      "n_iter": 59,
+      "random_state": 48
+    },
+    {
+      "run_id": 7,
+      "jm": 132705.84413819783,
+      "n_iter": 62,
+      "random_state": 49
+    },
+    {
+      "run_id": 8,
+      "jm": 132706.0392291036,
+      "n_iter": 54,
+      "random_state": 50
+    },
+    {
+      "run_id": 9,
+      "jm": 132706.03565982293,
+      "n_iter": 62,
+      "random_state": 51
+    }
+  ]
+}

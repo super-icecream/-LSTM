@@ -1,0 +1,72 @@
+{
+  "experiment": "B3: g_t -> PCA -> FCM analysis",
+  "timestamp": "20251217_141534",
+  "g_dim_original": 28,
+  "g_dim_after_scaler": 28,
+  "pca": {
+    "n_components": 3,
+    "mode": "fixed",
+    "total_explained_variance": 0.6229057908058167
+  },
+  "fcm": {
+    "n_clusters": 3,
+    "silhouette_score": 0.3581357002258301,
+    "davies_bouldin_index": 1.22238495541567,
+    "center_distances": [
+      [
+        0.0,
+        5.124122651891812,
+        6.291229920139095
+      ],
+      [
+        5.124122651891812,
+        0.0,
+        4.7505400277891905
+      ],
+      [
+        6.291229920139095,
+        4.7505400277891905,
+        0.0
+      ]
+    ]
+  },
+  "cluster_ratios": {
+    "cluster_0": 0.3922817534657175,
+    "cluster_1": 0.34199242329628243,
+    "cluster_2": 0.2657258232380001
+  },
+  "cluster_metrics_test": [
+    {
+      "cluster_id": 0,
+      "n_samples": 1309,
+      "nrmse_1h": 0.08303830676690742,
+      "nrmse_2h": 0.12056101344624669,
+      "nrmse_4h": 0.17337212558244747,
+      "nrmse_overall": 0.17337212558244747,
+      "avg_membership": 0.8873979389714357
+    },
+    {
+      "cluster_id": 1,
+      "n_samples": 2902,
+      "nrmse_1h": 0.07727951043564019,
+      "nrmse_2h": 0.09731594469333503,
+      "nrmse_4h": 0.11003408557507675,
+      "nrmse_overall": 0.11003408557507675,
+      "avg_membership": 0.8178683317027716
+    },
+    {
+      "cluster_id": 2,
+      "n_samples": 316,
+      "nrmse_1h": 0.12591479527357838,
+      "nrmse_2h": 0.14981768576280816,
+      "nrmse_4h": 0.1543100766607091,
+      "nrmse_overall": 0.1543100766607091,
+      "avg_membership": 0.6758131662241212
+    }
+  ],
+  "dropped_samples": {
+    "train": 0,
+    "val": 0,
+    "test": 0
+  }
+}

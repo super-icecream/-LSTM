@@ -1,0 +1,36 @@
+{
+  "n_clusters": 3,
+  "m": 2.0,
+  "scaler_g_path": "scaler_g.pkl",
+  "pca_path": "pca.pkl",
+  "fcm_centers_path": "fcm_centers.npy",
+  "scaler_X_path": "scaler_X.pkl",
+  "cluster_semantic_map": {
+    "1": "clear",
+    "2": "cloudy",
+    "0": "low_irradiance"
+  },
+  "cluster_stats": {
+    "0": {
+      "n_samples": 9423,
+      "Power_pu_mean": 0.1091664582490921,
+      "Power_pu_delta_mean_abs": 0.019768083468079567,
+      "GHI_delta_std": 9.148277282714844,
+      "semantic_label": "low_irradiance"
+    },
+    "1": {
+      "n_samples": 8215,
+      "Power_pu_mean": 0.572905957698822,
+      "Power_pu_delta_mean_abs": 0.03531799092888832,
+      "GHI_delta_std": 15.635523796081543,
+      "semantic_label": "clear"
+    },
+    "2": {
+      "n_samples": 6383,
+      "Power_pu_mean": 0.44023507833480835,
+      "Power_pu_delta_mean_abs": 0.059637270867824554,
+      "GHI_delta_std": 44.01295471191406,
+      "semantic_label": "cloudy"
+    }
+  }
+}

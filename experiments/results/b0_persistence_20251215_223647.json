@@ -1,0 +1,35 @@
+{
+  "model_name": "persistence",
+  "experiment_name": "b0",
+  "timestamp": "20251215_223647",
+  "total_samples": 7150,
+  "horizons": {
+    "1h": {
+      "horizon_steps": 4,
+      "mae": 4.781440214545454,
+      "rmse": 7.323577044247726,
+      "nrmse": 0.1464715408849545,
+      "n_samples": 7150
+    },
+    "2h": {
+      "horizon_steps": 8,
+      "mae": 8.763642854825175,
+      "rmse": 12.655766152486514,
+      "nrmse": 0.2531153230497303,
+      "n_samples": 7150
+    },
+    "4h": {
+      "horizon_steps": 16,
+      "mae": 15.805113672167833,
+      "rmse": 20.498805958641835,
+      "nrmse": 0.4099761191728367,
+      "n_samples": 7150
+    }
+  },
+  "overall": {
+    "mae": 9.783398913846156,
+    "rmse": 14.53735697389666,
+    "nrmse": 0.2907471394779332,
+    "n_samples": 21450
+  }
+}

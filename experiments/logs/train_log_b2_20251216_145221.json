@@ -1,0 +1,68 @@
+{
+  "experiment": "B2: X standardized, y unchanged",
+  "config_snapshot": {
+    "Lx": 16,
+    "Hmax": 16,
+    "daylight_enabled": true,
+    "daylight_mode": "mask",
+    "feature_columns": [
+      "Total solar irradiance (W/m2)",
+      "Direct normal irradiance (W/m2)",
+      "Global horizontal irradiance (W/m2)",
+      "Air temperature  (°C) ",
+      "Atmosphere (hpa)",
+      "Power (MW)"
+    ],
+    "nominal_capacity_mw": 50,
+    "hidden_size": 64,
+    "num_layers": 2,
+    "dropout": 0.1,
+    "lr": 0.001,
+    "batch_size": 256,
+    "max_epochs": 100,
+    "patience": 10
+  },
+  "scaler_X": {
+    "n_features": 6,
+    "mean": [
+      677.1893920898438,
+      160.9413604736328,
+      190.55853271484375,
+      18.58023452758789,
+      911.711181640625,
+      24.43915557861328
+    ],
+    "std": [
+      327.8034973144531,
+      237.61166381835938,
+      153.164306640625,
+      12.518187522888184,
+      7.395190238952637,
+      12.781713485717773
+    ]
+  },
+  "train_result": {
+    "best_epoch": 24,
+    "best_val_loss": 0.0166205485266718,
+    "best_val_rmse_4h_pu": 0.1290942281484604,
+    "stopped_early": true,
+    "total_epochs": 34
+  },
+  "test_metrics": {
+    "1h": {
+      "mae_mw": 3.85300529618014,
+      "rmse_mw": 6.089560557434204,
+      "nrmse": 0.12179121114868409
+    },
+    "2h": {
+      "mae_mw": 4.762288698100315,
+      "rmse_mw": 6.711747541727176,
+      "nrmse": 0.1342349508345435
+    },
+    "4h": {
+      "mae_mw": 5.840283629372014,
+      "rmse_mw": 7.072995779235549,
+      "nrmse": 0.14145991558471097
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "model_name": "persistence",
+  "experiment_name": "b0",
+  "timestamp": "20251215_235337",
+  "total_samples": 1117,
+  "daylight_filter": {
+    "enabled": true,
+    "dni_col": "Total solar irradiance (W/m2)",
+    "threshold": 5,
+    "mode": "drop"
+  },
+  "horizons": {
+    "1h": {
+      "horizon_steps": 4,
+      "mae": 4.32790342435094,
+      "rmse": 6.314307939037,
+      "nrmse": 0.12628615878073998,
+      "n_samples": 1117
+    },
+    "2h": {
+      "horizon_steps": 8,
+      "mae": 7.366349410922113,
+      "rmse": 9.463658227765336,
+      "nrmse": 0.1892731645553067,
+      "n_samples": 1117
+    },
+    "4h": {
+      "horizon_steps": 16,
+      "mae": 20.622117065353624,
+      "rmse": 24.050291036510796,
+      "nrmse": 0.4810058207302159,
+      "n_samples": 1117
+    }
+  },
+  "overall": {
+    "mae": 10.772123300208895,
+    "rmse": 15.360640294182701,
+    "nrmse": 0.307212805883654,
+    "n_samples": 3351
+  }
+}
